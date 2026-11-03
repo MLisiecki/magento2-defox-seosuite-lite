@@ -24,7 +24,7 @@ class NewAction extends Action
     /**
      * Authorization level
      */
-    public const ADMIN_RESOURCE = 'Defox_SEOSuite::template';
+    public const ADMIN_RESOURCE = 'Defox_SEOSuite::template_save';
 
     /**
      * @var ForwardFactory

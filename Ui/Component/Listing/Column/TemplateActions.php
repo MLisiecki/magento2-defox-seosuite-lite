@@ -10,6 +10,8 @@ declare(strict_types=1);
 
 namespace Defox\SEOSuite\Ui\Component\Listing\Column;
 
+use Magento\Framework\AuthorizationInterface;
+use Magento\Framework\Escaper;
 use Magento\Framework\UrlInterface;
 use Magento\Framework\View\Element\UiComponent\ContextInterface;
 use Magento\Framework\View\Element\UiComponentFactory;
@@ -28,9 +30,16 @@ class TemplateActions extends Column
     protected UrlInterface $urlBuilder;
 
     /**
+     * @var Escaper
+     */
+    private Escaper $escaper;
+
+    /**
      * @param ContextInterface $context
      * @param UiComponentFactory $uiComponentFactory
      * @param UrlInterface $urlBuilder
+     * @param Escaper $escaper
+     * @param AuthorizationInterface $authorization
      * @param array $components
      * @param array $data
      */
@@ -38,10 +47,13 @@ class TemplateActions extends Column
         ContextInterface $context,
         UiComponentFactory $uiComponentFactory,
         UrlInterface $urlBuilder,
+        Escaper $escaper,
+        private readonly AuthorizationInterface $authorization,
         array $components = [],
         array $data = []
     ) {
         $this->urlBuilder = $urlBuilder;
+        $this->escaper = $escaper;
         parent::__construct($context, $uiComponentFactory, $components, $data);
     }
 
@@ -56,6 +68,7 @@ class TemplateActions extends Column
         if (isset($dataSource['data']['items'])) {
             foreach ($dataSource['data']['items'] as & $item) {
                 if (isset($item['template_id'])) {
+                    $name = $this->escaper->escapeHtml((string)($item['name'] ?? ''));
                     $item[$this->getData('name')] = [
                         'edit' => [
                             'href' => $this->urlBuilder->getUrl(
@@ -75,11 +88,15 @@ class TemplateActions extends Column
                             ),
                             'label' => __('Delete'),
                             'confirm' => [
-                                'title' => __('Delete "${ $.$data.name }"'),
-                                'message' => __('Are you sure you want to delete the template "${ $.$data.name }"?')
-                            ]
+                                'title' => __('Delete "%1"', $name),
+                                'message' => __('Are you sure you want to delete the template "%1"?', $name)
+                            ],
+                            'post' => true
                         ]
                     ];
+                    if (!$this->authorization->isAllowed('Defox_SEOSuite::template_delete')) {
+                        unset($item[$this->getData('name')]['delete']);
+                    }
                 }
             }
         }

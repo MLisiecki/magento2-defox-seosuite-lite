@@ -11,26 +11,25 @@ namespace Defox\SEOSuite\Model\Sitemap\Generator;
 
 use Defox\SEOSuite\Helper\Config;
 use Defox\SEOSuite\Logger\Logger;
-use Defox\SEOSuite\Model\Cache\CacheManager;
 use Defox\SEOSuite\Model\Sitemap\SitemapGeneratorInterface;
 use Defox\SEOSuite\Model\Sitemap\SitemapProviderPool;
 use Magento\Framework\App\Filesystem\DirectoryList;
 use Magento\Framework\Event\ManagerInterface as EventManager;
+use Magento\Framework\Exception\LocalizedException;
 use Magento\Framework\Filesystem;
 use Magento\Framework\Filesystem\Directory\WriteInterface;
-use Magento\Framework\HTTP\Client\Curl;
+use Magento\Framework\Filesystem\File\WriteInterface as FileWriteInterface;
 use Magento\Framework\Stdlib\DateTime\DateTime;
-use Magento\Store\Model\StoreManagerInterface;
 
 /**
  * XML sitemap generator
- * 
- * Generates XML sitemaps with support for:
- * - Multiple files (50,000 URLs limit per file)
- * - Gzip compression
- * - Sitemap index
- * - Hreflang tags
- * - Image sitemaps
+ *
+ * Streams items batch by batch into per-store files "<code>_sitemap[_N|_index].xml[.gz]" (Config::getSitemapFileName):
+ * - Multiple files (50,000 URLs / 50 MB uncompressed per file) + sitemap index
+ * - Gzip compression (streamed)
+ * - Hreflang tags, image sitemaps
+ * Files are written under "<name>.tmp" and renamed only when the whole set is complete;
+ * the previously published set stays untouched until then.
  */
 class XmlGenerator implements SitemapGeneratorInterface
 {
@@ -38,22 +37,32 @@ class XmlGenerator implements SitemapGeneratorInterface
      * Maximum URLs per sitemap file
      */
     private const MAX_URLS_PER_FILE = 50000;
-    
+
     /**
      * Maximum file size (50MB uncompressed)
      */
     private const MAX_FILE_SIZE = 52428800; // 50MB
-    
+
+    /**
+     * Items requested from a provider per call
+     */
+    private const BATCH_SIZE = 1000;
+
+    /**
+     * Suffix of not-yet-published files (same directory, so the final rename is atomic)
+     */
+    private const TMP_SUFFIX = '.tmp';
+
     /**
      * XML namespace for sitemap
      */
     private const XML_NAMESPACE = 'http://www.sitemaps.org/schemas/sitemap/0.9';
-    
+
     /**
      * XML namespace for image sitemap
      */
     private const XML_NAMESPACE_IMAGE = 'http://www.google.com/schemas/sitemap-image/1.1';
-    
+
     /**
      * XML namespace for hreflang
      */
@@ -70,19 +79,9 @@ class XmlGenerator implements SitemapGeneratorInterface
     private Logger $logger;
 
     /**
-     * @var CacheManager
-     */
-    private CacheManager $cacheManager;
-
-    /**
      * @var SitemapProviderPool
      */
     private SitemapProviderPool $providerPool;
-
-    /**
-     * @var StoreManagerInterface
-     */
-    private StoreManagerInterface $storeManager;
 
     /**
      * @var Filesystem
@@ -100,11 +99,6 @@ class XmlGenerator implements SitemapGeneratorInterface
     private DateTime $dateTime;
 
     /**
-     * @var Curl
-     */
-    private Curl $curl;
-
-    /**
      * @var WriteInterface
      */
     private ?WriteInterface $directory = null;
@@ -113,45 +107,65 @@ class XmlGenerator implements SitemapGeneratorInterface
      * @var array
      */
     private array $generationStats = [];
-    
+
     /**
      * @var array
      */
     private array $generationOptions = [];
 
     /**
+     * Final names (without TMP_SUFFIX) of the files written in this run, in publish order
+     *
+     * @var string[]
+     */
+    private array $tempFiles = [];
+
+    /**
+     * File being written (one at a time)
+     *
+     * @var FileWriteInterface|null
+     */
+    private ?FileWriteInterface $stream = null;
+
+    /**
+     * @var \DeflateContext|null
+     */
+    private ?\DeflateContext $deflate = null;
+
+    /**
+     * @var int URLs in the current file
+     */
+    private int $fileUrls = 0;
+
+    /**
+     * @var int Uncompressed bytes in the current file
+     */
+    private int $fileBytes = 0;
+
+    /**
      * Constructor
      *
      * @param Config $config
      * @param Logger $logger
-     * @param CacheManager $cacheManager
      * @param SitemapProviderPool $providerPool
-     * @param StoreManagerInterface $storeManager
      * @param Filesystem $filesystem
      * @param EventManager $eventManager
      * @param DateTime $dateTime
-     * @param Curl $curl
      */
     public function __construct(
         Config $config,
         Logger $logger,
-        CacheManager $cacheManager,
         SitemapProviderPool $providerPool,
-        StoreManagerInterface $storeManager,
         Filesystem $filesystem,
         EventManager $eventManager,
-        DateTime $dateTime,
-        Curl $curl
+        DateTime $dateTime
     ) {
         $this->config = $config;
         $this->logger = $logger;
-        $this->cacheManager = $cacheManager;
         $this->providerPool = $providerPool;
-        $this->storeManager = $storeManager;
         $this->filesystem = $filesystem;
         $this->eventManager = $eventManager;
         $this->dateTime = $dateTime;
-        $this->curl = $curl;
     }
 
     /**
@@ -168,56 +182,41 @@ class XmlGenerator implements SitemapGeneratorInterface
             'total_urls' => 0,
             'errors' => []
         ];
-        
+        $this->tempFiles = [];
+        $path = '';
+
         try {
             $this->logger->info(sprintf('Starting sitemap generation for store %d', $storeId));
-            
-            // Clean old files first (or if force_regeneration is enabled)
-            if (isset($options['force_regeneration']) && $options['force_regeneration']) {
-                $this->logger->info('Force regeneration enabled - cleaning all old files');
-                $this->cleanOldFiles($storeId);
-            } else {
-                // Normal cleanup logic - could check if files exist and are recent
-                $this->cleanOldFiles($storeId);
+
+            $path = $this->config->getSitemapPath($storeId);
+            $compress = (bool)$this->config->getValue('defox_seosuite/sitemap/enable_compression', $storeId);
+
+            $files = $this->writeSitemapFiles($storeId, $path, $compress);
+
+            if ($this->generationStats['total_urls'] === 0) {
+                throw new LocalizedException(__('No items found for sitemap generation'));
             }
-            
-            // Get all items from enabled providers
-            $allItems = $this->getAllItems($storeId, $options);
-            
-            if (empty($allItems)) {
-                throw new \Exception('No items found for sitemap generation');
+
+            if (count($files) > 1) {
+                array_unshift($files, $this->writeIndex($storeId, $path, $compress, $files));
             }
-            
-            // Generate sitemap files
-            $generatedFiles = $this->generateSitemapFiles($storeId, $allItems);
-            
-            // Generate sitemap index if multiple files
-            if (count($generatedFiles) > 1) {
-                $indexFile = $this->generateIndex($storeId, $generatedFiles);
-                array_unshift($generatedFiles, $indexFile);
-            }
-            
-            // Clear sitemap cache
-            $this->cacheManager->clean(['defox_seosuite_sitemap']);
-            
+
+            $this->publish($storeId, $path);
+
+            $directory = $this->getDirectory();
+            $generatedFiles = array_map(
+                static fn (string $name): string => $directory->getAbsolutePath($path . $name),
+                $files
+            );
+
             // Validate sitemaps if enabled
             if (isset($options['validate_after_generation']) && $options['validate_after_generation']) {
                 $this->validateGeneratedFiles($generatedFiles);
             }
-            
-            // Ping search engines if enabled (check options first, then config)
-            $shouldPing = isset($options['ping_search_engines']) 
-                ? $options['ping_search_engines'] 
-                : $this->config->getValue('defox_seosuite/sitemap/ping_search_engines', $storeId);
-                
-            if ($shouldPing) {
-                $mainSitemapUrl = $this->getSitemapUrl($storeId, basename($generatedFiles[0]));
-                $this->pingSearchEngines($mainSitemapUrl, $storeId);
-            }
-            
+
             $this->generationStats['end_time'] = $this->dateTime->gmtDate();
             $this->generationStats['duration'] = microtime(true) - $startTime;
-            
+
             $this->logger->info(sprintf(
                 'Sitemap generation completed for store %d. Generated %d files with %d URLs in %.2f seconds',
                 $storeId,
@@ -225,17 +224,18 @@ class XmlGenerator implements SitemapGeneratorInterface
                 $this->generationStats['total_urls'],
                 $this->generationStats['duration']
             ));
-            
+
             return $generatedFiles;
-        } catch (\Exception $e) {
-            $this->logger->error('Error generating sitemap: ' . $e->getMessage());
+        } catch (\Throwable $e) {
+            $this->discardTempFiles($path);
+            $this->logger->error('Error generating sitemap: ' . $e->getMessage(), ['exception' => $e]);
             $this->generationStats['errors'][] = $e->getMessage();
-            
+
             // Send error notification if enabled
             if ($this->config->getValue('defox_seosuite/sitemap/generation_error_notification', $storeId)) {
                 $this->sendErrorNotification($storeId, $e);
             }
-            
+
             throw $e;
         }
     }
@@ -243,91 +243,9 @@ class XmlGenerator implements SitemapGeneratorInterface
     /**
      * @inheritDoc
      */
-    public function generateIndex(int $storeId, array $sitemapFiles): string
+    public function getGenerationStats(): array
     {
-        try {
-            $indexContent = '<?xml version="1.0" encoding="UTF-8"?>' . PHP_EOL;
-            $indexContent .= '<sitemapindex xmlns="' . self::XML_NAMESPACE . '">' . PHP_EOL;
-            
-            foreach ($sitemapFiles as $file) {
-                $url = $this->getSitemapUrl($storeId, basename($file));
-                $lastmod = $this->dateTime->gmtDate('Y-m-d\TH:i:s\Z');
-                
-                $indexContent .= '  <sitemap>' . PHP_EOL;
-                $indexContent .= '    <loc>' . htmlspecialchars($url) . '</loc>' . PHP_EOL;
-                $indexContent .= '    <lastmod>' . $lastmod . '</lastmod>' . PHP_EOL;
-                $indexContent .= '  </sitemap>' . PHP_EOL;
-            }
-            
-            $indexContent .= '</sitemapindex>';
-            
-            // Write index file
-            $indexFileName = 'sitemap_index.xml';
-            $this->writeFile($indexFileName, $indexContent);
-            
-            // Compress if enabled
-            $compressionEnabled = $this->config->getValue('defox_seosuite/sitemap/enable_compression', $storeId);
-            
-            if ($compressionEnabled) {
-                $this->compressFile($indexFileName);
-                $indexFileName .= '.gz';
-            }
-            
-            return $this->getFilePath($storeId, 0, $indexFileName);
-        } catch (\Exception $e) {
-            $this->logger->error('Error generating sitemap index: ' . $e->getMessage());
-            throw $e;
-        }
-    }
-
-    /**
-     * @inheritDoc
-     */
-    public function pingSearchEngines(string $sitemapUrl, int $storeId = 0): array
-    {
-        $results = [];
-        
-        // Google
-        if ($this->config->getValue('defox_seosuite/sitemap/ping_search_engines', $storeId)) {
-            $googleUrl = sprintf(
-                'https://www.google.com/ping?sitemap=%s',
-                urlencode($sitemapUrl)
-            );
-            $results['google'] = $this->pingUrl($googleUrl, 'Google');
-        }
-        
-        // Bing
-        if ($this->config->getValue('defox_seosuite/sitemap/ping_search_engines', $storeId)) {
-            $bingUrl = sprintf(
-                'https://www.bing.com/ping?sitemap=%s',
-                urlencode($sitemapUrl)
-            );
-            $results['bing'] = $this->pingUrl($bingUrl, 'Bing');
-        }
-        
-        return $results;
-    }
-
-    /**
-     * @inheritDoc
-     */
-    public function getFilePath(int $storeId, int $fileNumber = 0, string $customFileName = ''): string
-    {
-        $directory = $this->getDirectory();
-        $path = $this->config->getValue('defox_seosuite/sitemap/path', $storeId);
-        
-        // Ensure path ends with slash
-        $path = rtrim($path, '/') . '/';
-        
-        if ($customFileName) {
-            $fileName = $customFileName;
-        } else {
-            $fileName = $fileNumber > 0 
-                ? sprintf('sitemap_%d.xml', $fileNumber)
-                : 'sitemap.xml';
-        }
-        
-        return $directory->getAbsolutePath($path . $fileName);
+        return $this->generationStats;
     }
 
     /**
@@ -335,54 +253,7 @@ class XmlGenerator implements SitemapGeneratorInterface
      */
     public function getSitemapUrl(int $storeId, string $fileName): string
     {
-        $store = $this->storeManager->getStore($storeId);
-        $baseUrl = $store->getBaseUrl(\Magento\Framework\UrlInterface::URL_TYPE_LINK);
-        $path = $this->config->getValue('defox_seosuite/sitemap/path', $storeId);
-        
-        // Ensure path ends with slash
-        $path = rtrim($path, '/') . '/';
-        
-        return $baseUrl . ltrim($path, '/') . $fileName;
-    }
-
-    /**
-     * @inheritDoc
-     */
-    public function cleanOldFiles(int $storeId): int
-    {
-        $deletedCount = 0;
-        
-        try {
-            $directory = $this->getDirectory();
-            $path = $this->config->getValue('defox_seosuite/sitemap/path', $storeId);
-            
-            // Ensure path ends with slash
-            $path = rtrim($path, '/') . '/';
-            
-            // Pattern to match sitemap files
-            $patterns = [
-                'sitemap*.xml',
-                'sitemap*.xml.gz',
-                'sitemap_index.xml',
-                'sitemap_index.xml.gz'
-            ];
-            
-            foreach ($patterns as $pattern) {
-                $files = $directory->search($path . $pattern);
-                foreach ($files as $file) {
-                    if ($directory->isFile($file)) {
-                        $directory->delete($file);
-                        $deletedCount++;
-                    }
-                }
-            }
-            
-            $this->logger->info(sprintf('Cleaned %d old sitemap files', $deletedCount));
-        } catch (\Exception $e) {
-            $this->logger->error('Error cleaning old sitemap files: ' . $e->getMessage());
-        }
-        
-        return $deletedCount;
+        return $this->config->getSitemapUrl($storeId, $fileName);
     }
 
     /**
@@ -391,25 +262,24 @@ class XmlGenerator implements SitemapGeneratorInterface
     public function validateSitemap(string $filePath): array
     {
         $result = ['valid' => false, 'errors' => []];
-        
+        // Collect libxml errors instead of PHP warnings (whose text includes the file path)
+        $useInternalErrors = libxml_use_internal_errors(true);
+
         try {
             if (!file_exists($filePath)) {
                 $result['errors'][] = 'File does not exist';
                 return $result;
             }
-            
+
             // Load XML
             $xml = new \DOMDocument();
-            $xml->load($filePath);
-            
-            // Validate against schema
-            $schemaPath = __DIR__ . '/../../../etc/sitemap.xsd';
-            if (file_exists($schemaPath)) {
-                if (!$xml->schemaValidate($schemaPath)) {
-                    $result['errors'][] = 'XML schema validation failed';
-                }
+            if (!$xml->load($filePath, LIBXML_NONET)) {
+                $error = libxml_get_last_error();
+                $result['errors'][] = 'Failed to load XML document: '
+                    . ($error ? trim($error->message) . ' (line ' . $error->line . ')' : 'unknown error');
+                return $result;
             }
-            
+
             // Check URL count
             $urls = $xml->getElementsByTagName('url');
             if ($urls->length > self::MAX_URLS_PER_FILE) {
@@ -435,25 +305,30 @@ class XmlGenerator implements SitemapGeneratorInterface
             }
         } catch (\Exception $e) {
             $result['errors'][] = 'Validation error: ' . $e->getMessage();
+        } finally {
+            libxml_clear_errors();
+            libxml_use_internal_errors($useInternalErrors);
         }
-        
+
         return $result;
     }
 
+
     /**
-     * Get all items from providers
+     * Stream all provider items into temp sitemap files
+     *
+     * Providers are paged with (limit, offset); a page may be an array or any iterable (e.g. a generator), so nothing
+     * beyond one page is held in memory. A provider exception aborts the run (the published set stays as it was).
      *
      * @param int $storeId
-     * @param array $options
-     * @return array
+     * @param string $path Sitemap directory relative to pub/
+     * @param bool $compress
+     * @return string[] Final file names, in order
      */
-    private function getAllItems(int $storeId, array $options = []): array
+    private function writeSitemapFiles(int $storeId, string $path, bool $compress): array
     {
-        $allItems = [];
-        $batchSize = 1000; // Process in batches to manage memory
-
         $enabledProviders = $this->providerPool->getEnabledProviders($storeId);
-        
+
         if (empty($enabledProviders)) {
             $this->logger->warning(sprintf(
                 'XmlGenerator: No enabled providers found for store %d',
@@ -461,162 +336,213 @@ class XmlGenerator implements SitemapGeneratorInterface
             ));
             return [];
         }
-        
-        foreach ($enabledProviders as $providerCode => $provider) {
-            try {
-                
-                $offset = 0;
-                $hasMore = true;
-                $providerItemsCount = 0;
-                
-                while ($hasMore) {
-                    $items = $provider->getItems($storeId, $batchSize, $offset);
-                    
-                    if (empty($items)) {
-                        $hasMore = false;
-                    } else {
-                        $allItems = array_merge($allItems, $items);
-                        $providerItemsCount += count($items);
-                        $offset += $batchSize;
-                        
-                        if (count($items) < $batchSize) {
-                            $hasMore = false;
-                        }
+
+        $names = [];
+        $urlsetOpen = '<?xml version="1.0" encoding="UTF-8"?>' . PHP_EOL
+            . '<urlset xmlns="' . self::XML_NAMESPACE . '" xmlns:image="' . self::XML_NAMESPACE_IMAGE
+            . '" xmlns:xhtml="' . self::XML_NAMESPACE_XHTML . '">' . PHP_EOL;
+        $urlsetClose = '</urlset>' . PHP_EOL;
+
+        foreach ($enabledProviders as $provider) {
+            $offset = 0;
+            do {
+                $count = 0;
+                foreach ($provider->getItems($storeId, self::BATCH_SIZE, $offset) as $item) {
+                    $count++;
+                    if (!$item->isIncluded()) {
+                        continue;
                     }
+
+                    $urlXml = $this->generateUrlXml($item);
+
+                    if ($this->stream !== null
+                        && ($this->fileUrls >= self::MAX_URLS_PER_FILE
+                            || $this->fileBytes + strlen($urlXml) + strlen($urlsetClose) > self::MAX_FILE_SIZE)
+                    ) {
+                        $this->closeFile($urlsetClose);
+                    }
+
+                    if ($this->stream === null) {
+                        $suffix = $names ? '_' . (count($names) + 1) : '';
+                        $names[] = $this->openFile(
+                            $path,
+                            $this->config->getSitemapFileName($storeId, $suffix, $compress),
+                            $compress,
+                            $urlsetOpen
+                        );
+                    }
+
+                    $this->writeChunk($urlXml);
+                    $this->fileUrls++;
+                    $this->generationStats['total_urls']++;
                 }
-                
-            } catch (\Exception $e) {
-                $this->logger->error(sprintf(
-                    'XmlGenerator: Error getting items from provider "%s" for store %d: %s',
-                    $providerCode,
-                    $storeId,
-                    $e->getMessage()
-                ));
-                $this->logger->error('Stack trace: ' . $e->getTraceAsString());
-                $this->generationStats['errors'][] = sprintf(
-                    'Provider %s: %s',
-                    $providerCode,
-                    $e->getMessage()
-                );
-            }
+                $offset += self::BATCH_SIZE;
+            } while ($count === self::BATCH_SIZE);
         }
-        
-        return $allItems;
+
+        if ($this->stream !== null) {
+            $this->closeFile($urlsetClose);
+        }
+
+        return $names;
     }
 
     /**
-     * Generate sitemap files
+     * Write the temp sitemap index listing the given files
      *
      * @param int $storeId
-     * @param array $items
-     * @return array Generated file paths
+     * @param string $path
+     * @param bool $compress
+     * @param string[] $fileNames
+     * @return string Final index file name
      */
-    private function generateSitemapFiles(int $storeId, array $items): array
+    private function writeIndex(int $storeId, string $path, bool $compress, array $fileNames): string
     {
-        $generatedFiles = [];
-        $fileNumber = 1;
-        $currentFileUrls = 0;
-        $currentFileSize = 0;
-        
-        // Start first file
-        $xmlWriter = $this->startSitemapFile();
-        
-        foreach ($items as $item) {
-            if (!$item->isIncluded()) {
-                continue;
-            }
-            
-            // Check if we need to start a new file
-            if ($currentFileUrls >= self::MAX_URLS_PER_FILE || 
-                $currentFileSize >= self::MAX_FILE_SIZE * 0.9) { // 90% of max size
-                
-                // Close current file
-                $filePath = $this->finishSitemapFile($xmlWriter, $storeId, $fileNumber);
-                $generatedFiles[] = $filePath;
-                
-                // Start new file
-                $fileNumber++;
-                $currentFileUrls = 0;
-                $currentFileSize = 0;
-                $xmlWriter = $this->startSitemapFile();
-            }
-            
-            // Write URL
-            $urlXml = $this->generateUrlXml($item);
-            $xmlWriter->writeRaw($urlXml);
-            
-            $currentFileUrls++;
-            $currentFileSize += strlen($urlXml);
-            $this->generationStats['total_urls']++;
+        $indexName = $this->openFile(
+            $path,
+            $this->config->getSitemapFileName($storeId, '_index', $compress),
+            $compress,
+            '<?xml version="1.0" encoding="UTF-8"?>' . PHP_EOL
+                . '<sitemapindex xmlns="' . self::XML_NAMESPACE . '">' . PHP_EOL
+        );
+        $lastmod = $this->dateTime->gmtDate('Y-m-d\TH:i:s\Z');
+
+        foreach ($fileNames as $fileName) {
+            $this->writeChunk(
+                '  <sitemap>' . PHP_EOL
+                . '    <loc>' . htmlspecialchars($this->config->getSitemapUrl($storeId, $fileName)) . '</loc>' . PHP_EOL
+                . '    <lastmod>' . $lastmod . '</lastmod>' . PHP_EOL
+                . '  </sitemap>' . PHP_EOL
+            );
         }
-        
-        // Close last file
-        if ($currentFileUrls > 0) {
-            $filePath = $this->finishSitemapFile($xmlWriter, $storeId, $fileNumber);
-            $generatedFiles[] = $filePath;
-        }
-        
-        return $generatedFiles;
+
+        $this->closeFile('</sitemapindex>' . PHP_EOL);
+
+        return $indexName;
     }
 
     /**
-     * Start a new sitemap file
+     * Open "<name>.tmp" for writing and write the header
      *
-     * @return \XMLWriter
+     * @param string $path
+     * @param string $fileName Final name
+     * @param bool $compress
+     * @param string $header
+     * @return string $fileName
      */
-    private function startSitemapFile(): \XMLWriter
+    private function openFile(string $path, string $fileName, bool $compress, string $header): string
     {
-        $xmlWriter = new \XMLWriter();
-        $xmlWriter->openMemory();
-        $xmlWriter->setIndent(true);
-        $xmlWriter->setIndentString('  ');
-        
-        $xmlWriter->startDocument('1.0', 'UTF-8');
-        $xmlWriter->startElement('urlset');
-        $xmlWriter->writeAttribute('xmlns', self::XML_NAMESPACE);
-        $xmlWriter->writeAttribute('xmlns:image', self::XML_NAMESPACE_IMAGE);
-        $xmlWriter->writeAttribute('xmlns:xhtml', self::XML_NAMESPACE_XHTML);
-        
-        return $xmlWriter;
+        $this->tempFiles[] = $fileName;
+        $this->stream = $this->getDirectory()->openFile($path . $fileName . self::TMP_SUFFIX, 'w');
+        $this->deflate = $compress ? deflate_init(ZLIB_ENCODING_GZIP, ['level' => 9]) : null;
+        $this->fileUrls = 0;
+        $this->fileBytes = 0;
+        $this->writeChunk($header);
+
+        return $fileName;
     }
 
     /**
-     * Finish and save sitemap file
+     * Append to the current file (gzip-compressed on the fly when enabled)
      *
-     * @param \XMLWriter $xmlWriter
-     * @param int $storeId
-     * @param int $fileNumber
-     * @return string File path
+     * @param string $data
+     * @return void
      */
-    private function finishSitemapFile(\XMLWriter $xmlWriter, int $storeId, int $fileNumber): string
+    private function writeChunk(string $data): void
     {
-        $xmlWriter->endElement(); // urlset
-        $xmlWriter->endDocument();
-        
-        $content = $xmlWriter->outputMemory();
-        $fileName = $fileNumber > 1 
-            ? sprintf('sitemap_%d.xml', $fileNumber)
-            : 'sitemap.xml';
-        
-        $this->writeFile($fileName, $content);
-        
-        // Compress if enabled
-        $compressionEnabled = $this->config->getValue('defox_seosuite/sitemap/enable_compression', $storeId);
-        
-        if ($compressionEnabled) {
-            $this->compressFile($fileName);
-            $fileName .= '.gz';
+        $this->fileBytes += strlen($data);
+        $this->stream->write($this->deflate ? deflate_add($this->deflate, $data, ZLIB_NO_FLUSH) : $data);
+    }
+
+    /**
+     * Write the footer, close the current file and record its stats
+     *
+     * @param string $footer
+     * @return void
+     */
+    private function closeFile(string $footer): void
+    {
+        $this->writeChunk($footer);
+        if ($this->deflate) {
+            $this->stream->write(deflate_add($this->deflate, '', ZLIB_FINISH));
         }
-        
-        $filePath = $this->getFilePath($storeId, $fileNumber, $fileName);
-        
+        $this->stream->close();
+        $this->stream = null;
+        $this->deflate = null;
+
         $this->generationStats['files'][] = [
-            'name' => $fileName,
-            'size' => strlen($content),
-            'urls' => substr_count($content, '<url>')
+            'name' => end($this->tempFiles),
+            'size' => $this->fileBytes,
+            'urls' => $this->fileUrls
         ];
-        
-        return $filePath;
+    }
+
+    /**
+     * Rename the complete temp set onto the published names (index last), then delete this store's stale files
+     *
+     * @param int $storeId
+     * @param string $path
+     * @return void
+     */
+    private function publish(int $storeId, string $path): void
+    {
+        $directory = $this->getDirectory();
+        $published = $this->tempFiles;
+
+        foreach ($published as $fileName) {
+            $directory->renameFile($path . $fileName . self::TMP_SUFFIX, $path . $fileName);
+        }
+        $this->tempFiles = [];
+
+        try {
+            $deleted = 0;
+            foreach ($directory->read($path === '' ? null : rtrim($path, '/')) as $file) {
+                $fileName = basename($file);
+                if ($this->config->isSitemapFileOfStore($storeId, $fileName)
+                    && !in_array($fileName, $published, true)
+                    && $directory->isFile($file)
+                ) {
+                    $directory->delete($file);
+                    $deleted++;
+                }
+            }
+            $this->logger->info(sprintf('Removed %d stale sitemap files of store %d', $deleted, $storeId));
+        } catch (\Exception $e) {
+            // The new set is already live; a leftover old part file is harmless
+            $this->logger->warning('Error removing stale sitemap files: ' . $e->getMessage(), ['exception' => $e]);
+        }
+    }
+
+    /**
+     * Close and delete this run's unpublished temp files
+     *
+     * @param string $path
+     * @return void
+     */
+    private function discardTempFiles(string $path): void
+    {
+        $directory = $this->getDirectory();
+
+        try {
+            if ($this->stream !== null) {
+                $this->stream->close();
+            }
+        } catch (\Exception $e) {
+            $this->logger->warning('Error closing sitemap temp file: ' . $e->getMessage());
+        }
+        $this->stream = null;
+        $this->deflate = null;
+
+        foreach ($this->tempFiles as $fileName) {
+            try {
+                if ($directory->isFile($path . $fileName . self::TMP_SUFFIX)) {
+                    $directory->delete($path . $fileName . self::TMP_SUFFIX);
+                }
+            } catch (\Exception $e) {
+                $this->logger->warning('Error removing sitemap temp file: ' . $e->getMessage());
+            }
+        }
+        $this->tempFiles = [];
     }
 
     /**
@@ -684,84 +610,6 @@ class XmlGenerator implements SitemapGeneratorInterface
         return $xml;
     }
 
-    /**
-     * Write file
-     *
-     * @param string $fileName
-     * @param string $content
-     * @return void
-     */
-    private function writeFile(string $fileName, string $content): void
-    {
-        $directory = $this->getDirectory();
-        $path = $this->config->getValue('defox_seosuite/sitemap/path');
-        
-        // Ensure path ends with slash
-        $path = rtrim($path, '/') . '/';
-        
-        $fullPath = $path . $fileName;
-
-        // Ensure directory exists
-        $directory->create($path);
-        
-        $directory->writeFile($fullPath, $content);
-    }
-
-    /**
-     * Compress file using gzip
-     *
-     * @param string $fileName
-     * @return void
-     */
-    private function compressFile(string $fileName): void
-    {
-        $directory = $this->getDirectory();
-        $path = $this->config->getValue('defox_seosuite/sitemap/path');
-        
-        // Ensure path ends with slash
-        $path = rtrim($path, '/') . '/';
-        $filePath = $path . $fileName;
-        
-        $content = $directory->readFile($filePath);
-        $compressed = gzencode($content, 9);
-        
-        $directory->writeFile($filePath . '.gz', $compressed);
-        $directory->delete($filePath);
-    }
-
-    /**
-     * Ping URL
-     *
-     * @param string $url
-     * @param string $engineName
-     * @return array
-     */
-    private function pingUrl(string $url, string $engineName): array
-    {
-        try {
-            $this->curl->get($url);
-            $status = $this->curl->getStatus();
-            
-            $result = [
-                'success' => $status >= 200 && $status < 300,
-                'status' => $status,
-                'message' => $status >= 200 && $status < 300 
-                    ? 'Successfully pinged ' . $engineName
-                    : 'Failed to ping ' . $engineName . '. HTTP status: ' . $status
-            ];
-
-        } catch (\Exception $e) {
-            $result = [
-                'success' => false,
-                'status' => 0,
-                'message' => 'Error pinging ' . $engineName . ': ' . $e->getMessage()
-            ];
-            
-            $this->logger->error('Error pinging ' . $engineName . ': ' . $e->getMessage());
-        }
-        
-        return $result;
-    }
 
     /**
      * Send error notification
@@ -770,7 +618,7 @@ class XmlGenerator implements SitemapGeneratorInterface
      * @param \Exception $exception
      * @return void
      */
-    private function sendErrorNotification(int $storeId, \Exception $exception): void
+    private function sendErrorNotification(int $storeId, \Throwable $exception): void
     {
         try {
             $this->eventManager->dispatch('defox_seosuite_sitemap_generation_error', [

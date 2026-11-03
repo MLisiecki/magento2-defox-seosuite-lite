@@ -14,6 +14,7 @@ use Magento\Backend\Block\Template;
 use Magento\Backend\Block\Template\Context;
 use Magento\Store\Model\StoreManagerInterface;
 use Magento\Framework\App\Filesystem\DirectoryList;
+use Magento\Framework\Exception\LocalizedException;
 
 /**
  * Sitemap generation form block
@@ -111,11 +112,8 @@ class Generate extends Template
     public function getDefaultOptions(): array
     {
         return [
-            'force_regeneration' => false,
-            'ping_search_engines' => (bool)$this->config->getValue('defox_seosuite/sitemap/ping_search_engines'),
-            'validate_after_generation' => false,
-            'include_images' => (bool)$this->config->getValue('defox_seosuite/sitemap/product/include_images'),
-            'include_hreflang' => (bool)$this->config->getValue('defox_seosuite/sitemap/enable_hreflang')
+            // ponytail: images/hreflang follow each store's config (XmlGenerator), no global override
+            'validate_after_generation' => false
         ];
     }
 
@@ -130,34 +128,25 @@ class Generate extends Template
     }
 
     /**
-     * Get sitemap path
+     * Check if a store's sitemap directory is writable (creates it when missing)
      *
-     * @return string
-     */
-    public function getSitemapPath(): string
-    {
-        return $this->config->getSitemapPath();
-    }
-
-    /**
-     * Check if sitemap directory is writable
-     *
+     * @param int $storeId
      * @return bool
+     * @throws LocalizedException invalid stored Sitemap Path
      */
-    public function isSitemapDirectoryWritable(): bool
+    public function isSitemapDirectoryWritable(int $storeId): bool
     {
+        $fullPath = $this->config->getFullSitemapPath($storeId);
+
         try {
-            $fullPath = $this->config->getFullSitemapPath();
-            
             // Tworzenie katalogu jeśli nie istnieje
             if (!is_dir($fullPath)) {
                 if (!mkdir($fullPath, 0755, true) && !is_dir($fullPath)) {
                     return false;
                 }
             }
-            
+
             return is_writable($fullPath);
-            
         } catch (\Exception $e) {
             return false;
         }
@@ -198,16 +187,6 @@ class Generate extends Template
     }
 
     /**
-     * Check if current user can ping search engines
-     *
-     * @return bool
-     */
-    public function canPingSearchEngines(): bool
-    {
-        return (bool)$this->config->getValue('defox_seosuite/sitemap/ping_search_engines');
-    }
-
-    /**
      * Get configuration warnings
      *
      * @return array
@@ -228,51 +207,72 @@ class Generate extends Template
             $warnings[] = __('No stores have sitemap enabled. Check store-specific settings.');
         }
         
-        if (!$this->isSitemapDirectoryWritable()) {
-            $warnings[] = __('Sitemap directory "%1" is not writable.', $this->getSitemapPath());
+        foreach ($enabledStores as $store) {
+            $storeId = (int)$store['value'];
+            try {
+                if (!$this->isSitemapDirectoryWritable($storeId)) {
+                    $warnings[] = __(
+                        'Sitemap directory "%1" is not writable.',
+                        $this->config->getSitemapPath($storeId)
+                    );
+                }
+            } catch (LocalizedException $e) {
+                $warnings[] = __('Store %1: %2', $store['label'], $e->getMessage());
+            }
         }
         
         return $warnings;
     }
 
     /**
-     * Get robots.txt setup information
+     * Get robots.txt setup information: one "Sitemap:" line per store with sitemap enabled
      *
      * @return array
      */
     public function getRobotsTxtInfo(): array
     {
-        $baseUrl = $this->storeManager->getStore()->getBaseUrl();
-        $sitemapPath = $this->getSitemapPath();
-        
+        $sitemapUrls = [];
+        foreach ($this->getAvailableStores() as $store) {
+            if (!$store['enabled']) {
+                continue;
+            }
+            $storeId = (int)$store['value'];
+            try {
+                $fileName = $this->config->getPublishedSitemapFileName($storeId)
+                    ?? $this->config->getSitemapFileName(
+                        $storeId,
+                        '',
+                        (bool)$this->config->getValue('defox_seosuite/sitemap/enable_compression', $storeId)
+                    );
+                $sitemapUrls[$store['label']] = $this->config->getSitemapUrl($storeId, $fileName);
+            } catch (LocalizedException $e) {
+                continue; // invalid path is already reported by getConfigurationWarnings()
+            }
+        }
+
         return [
             'robots_file_path' => 'pub/robots.txt',
-            'sitemap_urls' => [
-                rtrim($baseUrl, '/') . '/' . ltrim($sitemapPath, '/') . 'sitemap.xml',
-                rtrim($baseUrl, '/') . '/' . ltrim($sitemapPath, '/') . 'sitemap_index.xml'
-            ],
-            'robots_content_example' => $this->generateRobotsExample($baseUrl, $sitemapPath)
+            'sitemap_urls' => array_values($sitemapUrls),
+            'robots_content_example' => $this->generateRobotsExample($sitemapUrls)
         ];
     }
 
     /**
      * Generate example robots.txt content
      *
-     * @param string $baseUrl
-     * @param string $sitemapPath
+     * @param string[] $sitemapUrls store label => sitemap URL
      * @return string
      */
-    private function generateRobotsExample(string $baseUrl, string $sitemapPath): string
+    private function generateRobotsExample(array $sitemapUrls): string
     {
         $content = "User-agent: *\n";
         $content .= "Allow: /\n\n";
-        $content .= "# Add these lines to inform search engines about your sitemaps:\n";
-        $content .= "Sitemap: " . rtrim($baseUrl, '/') . '/' . ltrim($sitemapPath, '/') . "sitemap.xml\n";
-        $content .= "or\n";
-        $content .= "Sitemap: " . rtrim($baseUrl, '/') . '/' . ltrim($sitemapPath, '/') . "sitemap_index.xml";
-        $content .= "\n";
-        $content .= "If you are using gz compression, use sitemap.xml.gz or sitemap_index.xml.gz instead.";
-        
-        return $content;
+        $content .= "# Add these lines to inform search engines about your sitemaps\n";
+        $content .= "# (robots.txt is per domain: keep only the lines of stores served from that domain)\n";
+        foreach ($sitemapUrls as $label => $url) {
+            $content .= '# ' . $label . "\n" . 'Sitemap: ' . $url . "\n";
+        }
+
+        return rtrim($content);
     }
 }

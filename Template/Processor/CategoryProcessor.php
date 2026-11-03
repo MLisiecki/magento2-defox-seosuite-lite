@@ -10,12 +10,11 @@ declare(strict_types=1);
 
 namespace Defox\SEOSuite\Template\Processor;
 
-use Defox\SEOSuite\Helper\Data as SeoHelper;
+use Defox\SEOSuite\Model\Text\Cleaner;
 use Defox\SEOSuite\Template\AbstractVariableProcessor;
 use Magento\Catalog\Api\Data\CategoryInterface;
 use Magento\Catalog\Model\Category;
 use Magento\Catalog\Model\ResourceModel\Product\CollectionFactory as ProductCollectionFactory;
-use Magento\Framework\App\CacheInterface;
 use Magento\Framework\Escaper;
 use Magento\Store\Model\StoreManagerInterface;
 
@@ -32,20 +31,18 @@ class CategoryProcessor extends AbstractVariableProcessor
     protected ProductCollectionFactory $productCollectionFactory;
 
     /**
-     * @param SeoHelper $seoHelper
      * @param StoreManagerInterface $storeManager
      * @param Escaper $escaper
-     * @param CacheInterface $cache
+     * @param Cleaner $textCleaner
      * @param ProductCollectionFactory $productCollectionFactory
      */
     public function __construct(
-        SeoHelper $seoHelper,
         StoreManagerInterface $storeManager,
         Escaper $escaper,
-        CacheInterface $cache,
+        Cleaner $textCleaner,
         ProductCollectionFactory $productCollectionFactory
     ) {
-        parent::__construct($seoHelper, $storeManager, $escaper, $cache);
+        parent::__construct($storeManager, $escaper, $textCleaner);
         $this->productCollectionFactory = $productCollectionFactory;
     }
 
@@ -104,9 +101,6 @@ class CategoryProcessor extends AbstractVariableProcessor
         if (empty($propertyPath)) {
             return '';
         }
-
-        // Ensure entity is properly loaded
-        $entity = $this->ensureEntityLoaded($entity);
 
         $prefix = $propertyPath[0];
         $property = $propertyPath[1] ?? null;
@@ -203,7 +197,7 @@ class CategoryProcessor extends AbstractVariableProcessor
             
             default:
                 // Try custom attributes
-                return $this->getCategoryCustomAttribute($category, $property);
+                return $this->getEntityAttributeValue($category, $property);
         }
     }
 
@@ -323,63 +317,18 @@ class CategoryProcessor extends AbstractVariableProcessor
      */
     protected function getParentCategory($category)
     {
-        if (method_exists($category, 'getParentCategory')) {
-            $parentCategory = $category->getParentCategory();
-            if ($parentCategory && $parentCategory->getId() && $parentCategory->getId() > 1) {
-                return $parentCategory;
-            }
+        // ponytail: Category::getParentCategory() memoizes a single repository get; no clone+load fallback (CR-29)
+        if (!method_exists($category, 'getParentCategory') || (int)$category->getParentId() <= 1) {
+            return null;
         }
-        
-        if (method_exists($category, 'getParentId')) {
-            $parentId = $category->getParentId();
-            if ($parentId && $parentId > 1) {
-                try {
-                    // Load parent category using same class as current category
-                    $parentCategory = clone $category;
-                    $parentCategory->load($parentId);
-                    if ($parentCategory->getId()) {
-                        return $parentCategory;
-                    }
-                } catch (\Exception $e) {
-                    // Continue with fallback
-                }
-            }
-        }
-        
-        return null;
-    }
 
-    /**
-     * Get category custom attribute
-     *
-     * @param CategoryInterface|Category $category
-     * @param string $attributeCode
-     * @return string
-     */
-    protected function getCategoryCustomAttribute($category, string $attributeCode): string
-    {
-        // Try getter method first
-        $method = 'get' . str_replace(' ', '', ucwords(str_replace('_', ' ', $attributeCode)));
-        if (method_exists($category, $method)) {
-            $value = $category->$method();
-            return $value !== null ? (string)$value : '';
+        try {
+            $parentCategory = $category->getParentCategory();
+        } catch (\Exception $e) {
+            return null;
         }
-        
-        // Try custom attribute
-        if (method_exists($category, 'getCustomAttribute')) {
-            $attribute = $category->getCustomAttribute($attributeCode);
-            if ($attribute) {
-                return (string)$attribute->getValue();
-            }
-        }
-        
-        // Try getData
-        if (method_exists($category, 'getData')) {
-            $value = $category->getData($attributeCode);
-            return $value !== null ? (string)$value : '';
-        }
-        
-        return '';
+
+        return $parentCategory && $parentCategory->getId() ? $parentCategory : null;
     }
 
     /**
@@ -394,11 +343,8 @@ class CategoryProcessor extends AbstractVariableProcessor
             return '';
         }
         
-        // Decode HTML entities
-        $content = html_entity_decode($content, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-        
-        // Remove HTML tags but preserve some content structure
-        $content = strip_tags($content);
+        // Decode entities, then remove real markup only (keeps bare "<" such as "<10 cm")
+        $content = $this->textCleaner->clean($content);
         
         // Remove Page Builder artifacts
         $content = preg_replace('/\[data-pb-style=[^\]]*\]/', '', $content);

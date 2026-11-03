@@ -13,14 +13,12 @@ namespace Defox\SEOSuite\Helper;
 use Defox\SEOSuite\Helper\Config;
 use Defox\SEOSuite\Model\StructuredData\GeneratorPool;
 use Defox\SEOSuite\Model\StructuredData\Renderer\JsonLd;
+use Magento\Catalog\Helper\Data as CatalogHelper;
 use Magento\Catalog\Model\Category;
+use Magento\Catalog\Model\Config as CatalogConfig;
 use Magento\Catalog\Model\Product;
-use Magento\Cms\Api\PageRepositoryInterface;
 use Magento\Cms\Model\Page;
-use Magento\Cms\Model\PageFactory;
 use Magento\Framework\App\Request\Http as HttpRequest;
-use Magento\Framework\Exception\NoSuchEntityException;
-use Magento\Framework\Registry;
 use Magento\Store\Model\StoreManagerInterface;
 use Psr\Log\LoggerInterface;
 
@@ -32,6 +30,11 @@ use Psr\Log\LoggerInterface;
  */
 class StructuredDataManager
 {
+    /**
+     * Upper bound for the "p" param passed to the category product list
+     */
+    private const MAX_PAGE = 10000;
+
     /**
      * @var Config
      */
@@ -48,9 +51,11 @@ class StructuredDataManager
     private JsonLd $jsonLdRenderer;
     
     /**
-     * @var Registry
+     * Current product/category as resolved by the core view controllers (non-deprecated wrapper over the registry)
+     *
+     * @var CatalogHelper
      */
-    private Registry $registry;
+    private CatalogHelper $catalogHelper;
     
     /**
      * @var HttpRequest
@@ -63,19 +68,21 @@ class StructuredDataManager
     private StoreManagerInterface $storeManager;
     
     /**
-     * @var PageRepositoryInterface
+     * Shared page instance loaded by Magento\Cms\Helper\Page (active + store-filtered)
+     *
+     * @var Page
      */
-    private PageRepositoryInterface $pageRepository;
-    
-    /**
-     * @var PageFactory
-     */
-    private PageFactory $pageFactory;
+    private Page $cmsPage;
     
     /**
      * @var LoggerInterface
      */
     private LoggerInterface $logger;
+
+    /**
+     * @var CatalogConfig
+     */
+    private CatalogConfig $catalogConfig;
     
     /**
      * @var array|null
@@ -93,33 +100,33 @@ class StructuredDataManager
      * @param Config $configHelper
      * @param GeneratorPool $generatorPool
      * @param JsonLd $jsonLdRenderer
-     * @param Registry $registry
+     * @param CatalogHelper $catalogHelper
      * @param HttpRequest $request
      * @param StoreManagerInterface $storeManager
-     * @param PageRepositoryInterface $pageRepository
-     * @param PageFactory $pageFactory
+     * @param Page $cmsPage
      * @param LoggerInterface $logger
+     * @param CatalogConfig $catalogConfig
      */
     public function __construct(
         Config $configHelper,
         GeneratorPool $generatorPool,
         JsonLd $jsonLdRenderer,
-        Registry $registry,
+        CatalogHelper $catalogHelper,
         HttpRequest $request,
         StoreManagerInterface $storeManager,
-        PageRepositoryInterface $pageRepository,
-        PageFactory $pageFactory,
-        LoggerInterface $logger
+        Page $cmsPage,
+        LoggerInterface $logger,
+        CatalogConfig $catalogConfig
     ) {
         $this->configHelper = $configHelper;
         $this->generatorPool = $generatorPool;
         $this->jsonLdRenderer = $jsonLdRenderer;
-        $this->registry = $registry;
+        $this->catalogHelper = $catalogHelper;
         $this->request = $request;
         $this->storeManager = $storeManager;
-        $this->pageRepository = $pageRepository;
-        $this->pageFactory = $pageFactory;
+        $this->cmsPage = $cmsPage;
         $this->logger = $logger;
+        $this->catalogConfig = $catalogConfig;
     }
 
     /**
@@ -129,7 +136,7 @@ class StructuredDataManager
      */
     public function getJsonLd(): string
     {
-        if (!$this->configHelper->isStructuredDataEnabled()) {
+        if (!$this->isEnabled()) {
             return '';
         }
 
@@ -147,8 +154,8 @@ class StructuredDataManager
                 $this->renderedJsonLd = '';
             }
             
-        } catch (\Exception $e) {
-            $this->logger->error(
+        } catch (\Throwable $e) {
+            $this->logger->warning(
                 'SEOSuite: Error generating JSON-LD: ' . $e->getMessage(),
                 ['exception' => $e]
             );
@@ -171,6 +178,9 @@ class StructuredDataManager
         }
 
         $this->structuredDataItems = [];
+        if (!$this->isEnabled()) {
+            return $this->structuredDataItems;
+        }
         
         try {
             $context = $this->getContext();
@@ -184,25 +194,14 @@ class StructuredDataManager
                 $this->structuredDataItems = array_merge($this->structuredDataItems, $entityData);
             }
             
-            // Always try to add organization and website data on homepage
+            // Homepage: one pool call for the store runs Organization and WebSite once each (CR-12)
             if ($this->isHomePage()) {
-                // Add organization data
-                $organizationData = $this->generatorPool->generate(
-                    $this->storeManager->getStore(),
-                    ['type' => 'organization']
-                );
-                $this->structuredDataItems = array_merge($this->structuredDataItems, $organizationData);
-                
-                // Add website data with sitelinks searchbox
-                $websiteData = $this->generatorPool->generate(
-                    $this->storeManager->getStore(),
-                    ['type' => 'website']
-                );
-                $this->structuredDataItems = array_merge($this->structuredDataItems, $websiteData);
+                $storeData = $this->generatorPool->generate($this->storeManager->getStore());
+                $this->structuredDataItems = array_merge($this->structuredDataItems, $storeData);
             }
             
-        } catch (\Exception $e) {
-            $this->logger->error(
+        } catch (\Throwable $e) {
+            $this->logger->warning(
                 'SEOSuite: Error generating structured data items: ' . $e->getMessage(),
                 ['exception' => $e]
             );
@@ -218,57 +217,30 @@ class StructuredDataManager
      */
     public function isEnabled(): bool
     {
-        return $this->configHelper->isStructuredDataEnabled();
+        return $this->configHelper->isEnabled() && $this->configHelper->isStructuredDataEnabled();
     }
     
     /**
-     * Reset cached data (useful for testing)
+     * Page entity for JSON-LD and meta templates (the one entity detection, CR-23/CR-38)
      *
-     * @return void
-     */
-    public function reset(): void
-    {
-        $this->structuredDataItems = null;
-        $this->renderedJsonLd = null;
-    }
-    
-    /**
-     * Get current entity based on page type
+     * Only the core view actions, and only the entity core itself resolved there: current_product /
+     * current_category via Catalog\Helper\Data (registered after core's status/visibility/store checks) or the shared CMS page loaded by
+     * Magento\Cms\Helper\Page (trade-off 2). Other actions that register current_product (reviews, send-friend,
+     * third-party) get nothing, so two URLs never share one product's meta.
      *
      * @return Product|Category|Page|null
      */
-    private function getCurrentEntity()
+    public function getCurrentEntity()
     {
-        // Check for product page
-        $product = $this->registry->registry('current_product');
-        if ($product instanceof Product) {
-            return $product;
-        }
-        
-        // Check for category page
-        $category = $this->registry->registry('current_category');
-        if ($category instanceof Category) {
-            return $category;
-        }
-        
-        // Check for CMS page - try multiple registry keys
-        $cmsPage = $this->registry->registry('cms_page');
-        if ($cmsPage instanceof Page) {
-            return $cmsPage;
-        }
-        
-        // Alternative registry key for CMS pages
-        $cmsPage = $this->registry->registry('current_page');
-        if ($cmsPage instanceof Page) {
-            return $cmsPage;
-        }
-        
-        // Try to detect CMS page from request
-        if ($this->isCmsPageRequest()) {
-            return $this->getCmsPageFromRequest();
-        }
-        
-        return null;
+        $entity = match ($this->request->getFullActionName()) {
+            'catalog_product_view' => $this->catalogHelper->getProduct(),
+            'catalog_category_view' => $this->catalogHelper->getCategory(),
+            'cms_page_view', 'cms_index_index' => $this->cmsPage,
+            default => null,
+        };
+
+        return ($entity instanceof Product || $entity instanceof Category || $entity instanceof Page)
+            && $entity->getId() ? $entity : null;
     }
     
     /**
@@ -278,102 +250,51 @@ class StructuredDataManager
      */
     private function getContext(): array
     {
-        $context = [];
-        
-        // Add pagination info
-        $page = (int)$this->request->getParam('p', 1);
-        if ($page > 1) {
-            $context['current_page'] = $page;
-        }
-        
-        // Add sorting info
-        $sortOrder = $this->request->getParam('product_list_order');
-        if ($sortOrder !== null) {
-            $context['sort_order'] = (string)$sortOrder;
-            $context['sort_direction'] = (string)$this->request->getParam('product_list_dir', 'asc');
-        }
-        
-        // Add filter info
-        $filters = [];
         $params = $this->request->getParams();
-        foreach ($params as $key => $value) {
-            if (strpos((string)$key, 'filter_') === 0 || in_array($key, ['cat', 'price'], true)) {
-                $filters[$key] = $value;
-            }
+        $sortable = isset($params['product_list_order'])
+            ? array_map('strval', array_keys($this->catalogConfig->getAttributeUsedForSortByArray()))
+            : [];
+
+        return self::normalizeContext($params, $sortable);
+    }
+
+    /**
+     * Allowlisted, normalised listing context (bounded value space; raw request values never reach a collection)
+     *
+     * @param array $params Request params
+     * @param string[] $sortableCodes Attribute codes allowed for sorting
+     * @return array
+     */
+    public static function normalizeContext(array $params, array $sortableCodes): array
+    {
+        $context = [];
+
+        $page = $params['p'] ?? 1;
+        $page = is_scalar($page) ? (int)$page : 1;
+        if ($page > 1) {
+            $context['current_page'] = min($page, self::MAX_PAGE);
         }
-        if (!empty($filters)) {
-            $context['filters'] = $filters;
+
+        $order = $params['product_list_order'] ?? null;
+        if (is_string($order) && in_array($order, $sortableCodes, true)) {
+            $dir = $params['product_list_dir'] ?? 'asc';
+            $context['sort_order'] = $order;
+            $context['sort_direction'] = is_string($dir) && strtolower($dir) === 'desc' ? 'DESC' : 'ASC';
         }
-        
+
+        // ponytail: filter params are not used by any generator, so they are not part of the context
         return $context;
     }
     
     /**
-     * Check if current page is homepage
+     * Check if current page is homepage: the store root ("/", store code already stripped, query ignored)
+     * whatever route web/default/front points to, or the CMS home action itself
      *
      * @return bool
      */
     private function isHomePage(): bool
     {
-        $currentUrl = $this->request->getRequestUri();
-        return $currentUrl === '/' || $currentUrl === '/index.php' || $currentUrl === '/index.php/';
-    }
-    
-    /**
-     * Check if current request is for a CMS page
-     *
-     * @return bool
-     */
-    private function isCmsPageRequest(): bool
-    {
-        $moduleName = $this->request->getModuleName();
-        $controllerName = $this->request->getControllerName();
-        $actionName = $this->request->getActionName();
-        
-        // Check if this is a CMS page request
-        return ($moduleName === 'cms' && $controllerName === 'page' && $actionName === 'view') ||
-               ($moduleName === 'cms' && $controllerName === 'index' && $actionName === 'index');
-    }
-    
-    /**
-     * Get CMS page from request parameters using proper DI
-     *
-     * @return Page|null
-     */
-    private function getCmsPageFromRequest(): ?Page
-    {
-        try {
-            // Try to get page ID from request
-            $pageId = $this->request->getParam('page_id');
-            if ($pageId !== null) {
-                try {
-                    return $this->pageRepository->getById((int)$pageId);
-                } catch (NoSuchEntityException $e) {
-                    $this->logger->debug('SEOSuite: CMS page not found by ID: ' . $pageId);
-                }
-            }
-            
-            // Try to get page identifier from request URI
-            $identifier = trim($this->request->getRequestUri(), '/');
-            if ($identifier !== '' && $identifier !== 'index.php') {
-                // Remove .html suffix if present
-                $identifier = preg_replace('/\.html$/', '', $identifier);
-                
-                $page = $this->pageFactory->create();
-                $page->load($identifier, 'identifier');
-                
-                if ($page->getId() && $page->getIsActive()) {
-                    return $page;
-                }
-            }
-            
-        } catch (\Exception $e) {
-            $this->logger->debug(
-                'SEOSuite: Error getting CMS page from request: ' . $e->getMessage(),
-                ['exception' => $e]
-            );
-        }
-        
-        return null;
+        return in_array((string)$this->request->getOriginalPathInfo(), ['', '/'], true)
+            || $this->request->getFullActionName() === 'cms_index_index';
     }
 }

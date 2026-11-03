@@ -12,6 +12,7 @@ namespace Defox\SEOSuite\Block\Adminhtml\Sitemap;
 use Defox\SEOSuite\Helper\Config;
 use Magento\Backend\Block\Template;
 use Magento\Backend\Block\Template\Context;
+use Magento\Framework\Exception\LocalizedException;
 use Magento\Store\Model\StoreManagerInterface;
 
 /**
@@ -80,8 +81,7 @@ class Validate extends Template
         return [
             'validate' => $this->getUrl('defox_seosuite/sitemap/validate'),
             'get_current_sitemaps' => $this->getUrl('defox_seosuite/sitemap/validate', ['ajax_action' => 'get_current_sitemaps']),
-            'validate_url' => $this->getUrl('defox_seosuite/sitemap/validate', ['ajax_action' => 'validate_url']),
-            'get_progress' => $this->getUrl('defox_seosuite/sitemap/validate', ['ajax_action' => 'get_validation_progress'])
+            'validate_url' => $this->getUrl('defox_seosuite/sitemap/validate', ['ajax_action' => 'validate_url'])
         ];
     }
 
@@ -334,15 +334,6 @@ class Validate extends Template
         return $this->getUrl('adminhtml/system_config/edit/section/defox_seosuite');
     }
 
-    /**
-     * Check if validation is enabled
-     *
-     * @return bool
-     */
-    public function isValidationEnabled(): bool
-    {
-        return (bool)$this->config->getValue('defox_seosuite/sitemap_validation/enabled');
-    }
 
     /**
      * Get validation examples
@@ -397,15 +388,6 @@ class Validate extends Template
         ];
     }
 
-    /**
-     * Get validation history URL
-     *
-     * @return string
-     */
-    public function getValidationHistoryUrl(): string
-    {
-        return $this->getUrl('defox_seosuite/sitemap/validation_history');
-    }
 
     /**
      * Check if current user can validate sitemaps
@@ -462,21 +444,31 @@ class Validate extends Template
     public function getCurrentSitemapsInfo(): array
     {
         $sitemaps = [];
-        $sitemapPath = $this->config->getValue('defox_seosuite/sitemap/path') ?: 'media/';
         
         foreach ($this->storeManager->getStores() as $store) {
             if (!$store->getIsActive()) {
                 continue;
             }
             
-            $sitemapEnabled = (bool)$this->config->getValue('defox_seosuite/sitemap/enabled', (int)$store->getId());
+            $storeId = (int)$store->getId();
+            $sitemapEnabled = (bool)$this->config->getValue('defox_seosuite/sitemap/enabled', $storeId);
+
+            try {
+                $sitemapPath = $this->config->getSitemapPath($storeId);
+                $sitemapUrl = $this->config->getSitemapUrl(
+                    $storeId,
+                    $this->config->getPublishedSitemapFileName($storeId) ?? $this->config->getSitemapFileName($storeId)
+                );
+            } catch (LocalizedException $e) {
+                $sitemapPath = $sitemapUrl = '';
+            }
             
             $sitemaps[] = [
                 'store_id' => $store->getId(),
                 'store_name' => $store->getName(),
                 'store_code' => $store->getCode(),
                 'base_url' => $store->getBaseUrl(),
-                'sitemap_url' => $store->getBaseUrl() . 'sitemap.xml',
+                'sitemap_url' => $sitemapUrl,
                 'enabled' => $sitemapEnabled,
                 'path' => $sitemapPath
             ];
@@ -516,15 +508,6 @@ class Validate extends Template
         ];
     }
 
-    /**
-     * Check if advanced features are enabled
-     *
-     * @return bool
-     */
-    public function isAdvancedModeEnabled(): bool
-    {
-        return (bool)$this->config->getValue('defox_seosuite/sitemap_validation/advanced_mode');
-    }
 
     /**
      * Get error handling configuration

@@ -14,6 +14,7 @@ use Defox\SEOSuite\Api\TemplateRepositoryInterface;
 use Defox\SEOSuite\Model\ResourceModel\Template\CollectionFactory;
 use Magento\Backend\App\Action;
 use Magento\Backend\App\Action\Context;
+use Magento\Framework\App\Action\HttpPostActionInterface;
 use Magento\Framework\Controller\ResultFactory;
 use Magento\Framework\Exception\LocalizedException;
 use Magento\Ui\Component\MassAction\Filter;
@@ -23,12 +24,12 @@ use Magento\Ui\Component\MassAction\Filter;
  * 
  * Handles mass status updates of meta tag templates
  */
-class MassStatus extends Action
+class MassStatus extends Action implements HttpPostActionInterface
 {
     /**
      * Authorization level
      */
-    public const ADMIN_RESOURCE = 'Defox_SEOSuite::template';
+    public const ADMIN_RESOURCE = 'Defox_SEOSuite::template_save';
 
     /**
      * @var Filter

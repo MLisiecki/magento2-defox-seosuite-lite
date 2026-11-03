@@ -13,6 +13,7 @@ namespace Defox\SEOSuite\Controller\Adminhtml\Template;
 use Defox\SEOSuite\Api\TemplateRepositoryInterface;
 use Magento\Backend\App\Action;
 use Magento\Backend\App\Action\Context;
+use Magento\Framework\App\Action\HttpPostActionInterface;
 use Magento\Framework\Controller\Result\JsonFactory;
 use Magento\Framework\Exception\LocalizedException;
 
@@ -21,12 +22,17 @@ use Magento\Framework\Exception\LocalizedException;
  * 
  * Handles inline editing of meta tag templates in the grid
  */
-class InlineEdit extends Action
+class InlineEdit extends Action implements HttpPostActionInterface
 {
     /**
      * Authorization level
      */
-    public const ADMIN_RESOURCE = 'Defox_SEOSuite::template';
+    public const ADMIN_RESOURCE = 'Defox_SEOSuite::template_save';
+
+    /**
+     * Columns with an inline editor in defox_seosuite_template_listing.xml
+     */
+    private const EDITABLE_FIELDS = ['name', 'type', 'entity_type', 'priority', 'is_active'];
 
     /**
      * @var JsonFactory
@@ -67,22 +73,37 @@ class InlineEdit extends Action
         if ($this->getRequest()->getParam('isAjax')) {
             $postItems = $this->getRequest()->getParam('items', []);
             
-            if (!count($postItems)) {
+            if (!is_array($postItems) || !count($postItems)) {
                 $messages[] = __('Please correct the data sent.');
                 $error = true;
             } else {
-                foreach (array_keys($postItems) as $templateId) {
-                    $template = $this->templateRepository->getById((int)$templateId);
+                foreach ($postItems as $templateId => $item) {
+                    $templateId = (int)$templateId;
                     try {
-                        $template->setData(array_merge($template->getData(), $postItems[$templateId]));
+                        if (!is_array($item)
+                            || (isset($item['template_id']) && (int)$item['template_id'] !== $templateId)
+                        ) {
+                            throw new LocalizedException(__('Template ID mismatch.'));
+                        }
+                        $template = $this->templateRepository->getById($templateId);
+                        $data = array_intersect_key($item, array_flip(self::EDITABLE_FIELDS));
+                        foreach ($data as $field => $value) {
+                            if (!is_scalar($value)) {
+                                throw new LocalizedException(__('Invalid value for "%1".', $field));
+                            }
+                            $data[$field] = in_array($field, ['priority', 'is_active'], true)
+                                ? (int)$value
+                                : (string)$value;
+                        }
+                        $template->addData($data);
                         $this->templateRepository->save($template);
                     } catch (LocalizedException $e) {
-                        $messages[] = $this->getErrorWithTemplateId($template, $e->getMessage());
+                        $messages[] = $this->getErrorWithTemplateId($templateId, $e->getMessage());
                         $error = true;
                     } catch (\Exception $e) {
                         $messages[] = $this->getErrorWithTemplateId(
-                            $template,
-                            __('Something went wrong while saving the template.')
+                            $templateId,
+                            (string)__('Something went wrong while saving the template.')
                         );
                         $error = true;
                     }
@@ -99,12 +120,12 @@ class InlineEdit extends Action
     /**
      * Add template ID to error message
      *
-     * @param \Defox\SEOSuite\Api\Data\TemplateInterface $template
+     * @param int $templateId
      * @param string $errorText
      * @return string
      */
-    protected function getErrorWithTemplateId(\Defox\SEOSuite\Api\Data\TemplateInterface $template, string $errorText): string
+    protected function getErrorWithTemplateId(int $templateId, string $errorText): string
     {
-        return '[Template ID: ' . $template->getId() . '] ' . $errorText;
+        return '[Template ID: ' . $templateId . '] ' . $errorText;
     }
 }

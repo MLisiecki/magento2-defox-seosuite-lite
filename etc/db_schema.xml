@@ -1,0 +1,155 @@
+<?xml version="1.0"?>
+<!--
+/**
+ * @package     Defox_SEOSuite
+ * @author      Marcin Lisiecki
+ * @copyright   Copyright (c) 2025 deFox
+ * @license     GNU General Public License v3.0
+ */
+-->
+<schema xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="urn:magento:framework:Setup/Declaration/Schema/etc/schema.xsd">
+    <!-- Column order matches installs created by the former schema patches (meta/og columns appended last). -->
+    <table name="defox_seosuite_template" resource="default" engine="innodb" comment="Defox SEO Suite Template Table">
+        <column xsi:type="int" name="template_id" unsigned="true" nullable="false" identity="true" comment="Template ID"/>
+        <column xsi:type="varchar" name="name" length="255" nullable="false" comment="Name"/>
+        <column xsi:type="varchar" name="type" length="64" nullable="false" comment="Type"/>
+        <column xsi:type="varchar" name="entity_type" length="64" nullable="false" comment="Entity Type"/>
+        <column xsi:type="smallint" name="store_id" unsigned="true" nullable="false" default="0" comment="Store ID"/>
+        <column xsi:type="smallint" name="is_active" unsigned="false" nullable="false" default="1" comment="Is Active"/>
+        <column xsi:type="int" name="priority" unsigned="false" nullable="false" default="0" comment="Priority"/>
+        <column xsi:type="mediumtext" name="conditions_serialized" nullable="true" comment="Conditions Serialized"/>
+        <column xsi:type="timestamp" name="created_at" on_update="false" nullable="false" default="CURRENT_TIMESTAMP"
+                comment="Created At"/>
+        <column xsi:type="timestamp" name="updated_at" on_update="true" nullable="false" default="CURRENT_TIMESTAMP"
+                comment="Updated At"/>
+        <column xsi:type="text" name="meta_title_template" nullable="true" comment="Meta Title Template"/>
+        <column xsi:type="text" name="meta_description_template" nullable="true" comment="Meta Description Template"/>
+        <column xsi:type="text" name="meta_keywords_template" nullable="true" comment="Meta Keywords Template"/>
+        <column xsi:type="varchar" name="meta_robots_template" length="255" nullable="true" comment="Meta Robots Template"/>
+        <column xsi:type="text" name="og_title_template" nullable="true" comment="Open Graph Title Template"/>
+        <column xsi:type="text" name="og_description_template" nullable="true" comment="Open Graph Description Template"/>
+        <column xsi:type="varchar" name="og_type_template" length="255" nullable="true" comment="Open Graph Type Template"/>
+        <column xsi:type="text" name="og_image_template" nullable="true" comment="Open Graph Image Template"/>
+        <constraint xsi:type="primary" referenceId="PRIMARY">
+            <column name="template_id"/>
+        </constraint>
+        <constraint xsi:type="foreign" referenceId="DEFOX_SEOSUITE_TEMPLATE_STORE_ID_STORE_STORE_ID"
+                    table="defox_seosuite_template" column="store_id" referenceTable="store"
+                    referenceColumn="store_id" onDelete="CASCADE"/>
+        <index referenceId="DEFOX_SEOSUITE_TEMPLATE_TYPE_ENTITY_TYPE_STORE_ID_IS_ACTIVE" indexType="btree">
+            <column name="type"/>
+            <column name="entity_type"/>
+            <column name="store_id"/>
+            <column name="is_active"/>
+        </index>
+        <index referenceId="DEFOX_SEOSUITE_TEMPLATE_STORE_ID" indexType="btree">
+            <column name="store_id"/>
+        </index>
+    </table>
+    <table name="defox_seosuite_sitemap_exclusion" resource="default" engine="innodb"
+           comment="Defox SEO Suite - Sitemap Exclusions">
+        <column xsi:type="int" name="exclusion_id" unsigned="true" nullable="false" identity="true" comment="Exclusion ID"/>
+        <column xsi:type="varchar" name="entity_type" length="50" nullable="false"
+                comment="Entity Type (product, category, cms_page)"/>
+        <column xsi:type="varchar" name="entity_id" length="255" nullable="false" comment="Entity ID"/>
+        <column xsi:type="smallint" name="store_id" unsigned="true" nullable="false" default="0" comment="Store ID"/>
+        <column xsi:type="varchar" name="exclusion_type" length="50" nullable="false" default="manual"
+                comment="Exclusion Type (manual, auto_outofstock, auto_disabled)"/>
+        <column xsi:type="varchar" name="reason" length="255" nullable="true" comment="Exclusion Reason"/>
+        <column xsi:type="timestamp" name="created_at" on_update="false" nullable="false" default="CURRENT_TIMESTAMP"
+                comment="Created At"/>
+        <constraint xsi:type="primary" referenceId="PRIMARY">
+            <column name="exclusion_id"/>
+        </constraint>
+        <constraint xsi:type="unique" referenceId="DEFOX_SEOSUITE_SITEMAP_EXCLUSION_ENTITY_TYPE_ENTITY_ID_STORE_ID">
+            <column name="entity_type"/>
+            <column name="entity_id"/>
+            <column name="store_id"/>
+        </constraint>
+        <constraint xsi:type="foreign" referenceId="DEFOX_SEOSUITE_SITEMAP_EXCLUSION_STORE_ID_STORE_STORE_ID"
+                    table="defox_seosuite_sitemap_exclusion" column="store_id" referenceTable="store"
+                    referenceColumn="store_id" onDelete="CASCADE"/>
+        <index referenceId="DEFOX_SEOSUITE_SITEMAP_EXCLUSION_ENTITY_TYPE" indexType="btree">
+            <column name="entity_type"/>
+        </index>
+        <index referenceId="DEFOX_SEOSUITE_SITEMAP_EXCLUSION_STORE_ID" indexType="btree">
+            <column name="store_id"/>
+        </index>
+    </table>
+    <table name="defox_seosuite_sitemap_additional_links" resource="default" engine="innodb"
+           comment="Defox SEO Suite - Sitemap Additional Links">
+        <column xsi:type="int" name="link_id" unsigned="true" nullable="false" identity="true" comment="Link ID"/>
+        <column xsi:type="text" name="url" nullable="false" comment="URL"/>
+        <column xsi:type="varchar" name="title" length="255" nullable="true" comment="Link Title"/>
+        <column xsi:type="smallint" name="store_id" unsigned="true" nullable="false" default="0" comment="Store ID"/>
+        <column xsi:type="varchar" name="changefreq" length="50" nullable="false" default="weekly"
+                comment="Change Frequency"/>
+        <column xsi:type="decimal" name="priority" scale="1" precision="2" unsigned="false" nullable="false"
+                default="0.5" comment="Priority"/>
+        <column xsi:type="varchar" name="group_code" length="50" nullable="true" comment="Group Code for HTML Sitemap"/>
+        <column xsi:type="smallint" name="is_active" unsigned="false" nullable="false" default="1" comment="Is Active"/>
+        <column xsi:type="timestamp" name="created_at" on_update="false" nullable="false" default="CURRENT_TIMESTAMP"
+                comment="Created At"/>
+        <column xsi:type="timestamp" name="updated_at" on_update="true" nullable="false" default="CURRENT_TIMESTAMP"
+                comment="Updated At"/>
+        <constraint xsi:type="primary" referenceId="PRIMARY">
+            <column name="link_id"/>
+        </constraint>
+        <constraint xsi:type="foreign" referenceId="DEFOX_SEOSUITE_SITEMAP_ADDITIONAL_LINKS_STORE_ID_STORE_STORE_ID"
+                    table="defox_seosuite_sitemap_additional_links" column="store_id" referenceTable="store"
+                    referenceColumn="store_id" onDelete="CASCADE"/>
+        <index referenceId="DEFOX_SEOSUITE_SITEMAP_ADDITIONAL_LINKS_STORE_ID" indexType="btree">
+            <column name="store_id"/>
+        </index>
+        <index referenceId="DEFOX_SEOSUITE_SITEMAP_ADDITIONAL_LINKS_IS_ACTIVE" indexType="btree">
+            <column name="is_active"/>
+        </index>
+        <index referenceId="DEFOX_SEOSUITE_SITEMAP_ADDITIONAL_LINKS_GROUP_CODE" indexType="btree">
+            <column name="group_code"/>
+        </index>
+    </table>
+    <table name="defox_seosuite_sitemap_stats" resource="default" engine="innodb"
+           comment="Defox SEO Suite Sitemap Generation Statistics">
+        <column xsi:type="int" name="stat_id" unsigned="true" nullable="false" identity="true" comment="Statistics ID"/>
+        <column xsi:type="smallint" name="store_id" unsigned="true" nullable="false" default="0" comment="Store ID"/>
+        <column xsi:type="timestamp" name="generation_time" on_update="false" nullable="false"
+                default="CURRENT_TIMESTAMP" comment="Generation Time"/>
+        <column xsi:type="decimal" name="duration_seconds" scale="3" precision="10" unsigned="false" nullable="false"
+                default="0" comment="Duration in Seconds"/>
+        <column xsi:type="int" name="total_urls" unsigned="true" nullable="false" default="0"
+                comment="Total URLs Generated"/>
+        <column xsi:type="smallint" name="files_generated" unsigned="true" nullable="false" default="0"
+                comment="Number of Files Generated"/>
+        <column xsi:type="bigint" name="total_file_size" unsigned="true" nullable="false" default="0"
+                comment="Total File Size in Bytes"/>
+        <column xsi:type="smallint" name="errors_count" unsigned="true" nullable="false" default="0"
+                comment="Number of Errors"/>
+        <column xsi:type="text" name="provider_stats" nullable="true" comment="Provider Statistics (JSON)"/>
+        <column xsi:type="text" name="performance_metrics" nullable="true" comment="Performance Metrics (JSON)"/>
+        <column xsi:type="boolean" name="success" nullable="false" default="true" comment="Generation Success"/>
+        <constraint xsi:type="primary" referenceId="PRIMARY">
+            <column name="stat_id"/>
+        </constraint>
+        <constraint xsi:type="foreign" referenceId="DEFOX_SEOSUITE_SITEMAP_STATS_STORE_ID_STORE_STORE_ID"
+                    table="defox_seosuite_sitemap_stats" column="store_id" referenceTable="store"
+                    referenceColumn="store_id" onDelete="CASCADE"/>
+        <index referenceId="DEFOX_SEOSUITE_SITEMAP_STATS_STORE_ID" indexType="btree">
+            <column name="store_id"/>
+        </index>
+        <index referenceId="DEFOX_SEOSUITE_SITEMAP_STATS_GENERATION_TIME" indexType="btree">
+            <column name="generation_time"/>
+        </index>
+        <index referenceId="DEFOX_SEOSUITE_SITEMAP_STATS_SUCCESS" indexType="btree">
+            <column name="success"/>
+        </index>
+    </table>
+    <table name="catalog_product_entity" resource="default">
+        <column xsi:type="smallint" name="seo_canonical_disabled" unsigned="false" nullable="false" default="0"
+                comment="SEO Canonical Disabled"/>
+    </table>
+    <table name="catalog_category_entity" resource="default">
+        <column xsi:type="smallint" name="seo_canonical_disabled" unsigned="false" nullable="false" default="0"
+                comment="SEO Canonical Disabled"/>
+    </table>
+</schema>

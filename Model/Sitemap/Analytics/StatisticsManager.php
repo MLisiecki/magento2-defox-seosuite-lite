@@ -102,6 +102,24 @@ class StatisticsManager
     }
 
     /**
+     * Delete statistics rows older than the given number of days
+     *
+     * @param int $days Retention in days; 0 or less keeps everything
+     * @return int Number of deleted rows
+     */
+    public function deleteOlderThan(int $days): int
+    {
+        if ($days <= 0) {
+            return 0;
+        }
+
+        return $this->resourceConnection->getConnection()->delete(
+            $this->resourceConnection->getTableName('defox_seosuite_sitemap_stats'),
+            ['generation_time < ?' => $this->dateTime->gmtDate('Y-m-d H:i:s', time() - ($days * 86400))]
+        );
+    }
+
+    /**
      * Get generation statistics for dashboard
      *
      * @param int $storeId
@@ -520,34 +538,6 @@ class StatisticsManager
         }
 
         return $recentErrors;
-    }
-
-    /**
-     * Clean old statistics
-     *
-     * @param int $daysToKeep
-     * @return int Number of deleted records
-     */
-    public function cleanOldStatistics(int $daysToKeep = 90): int
-    {
-        try {
-            $connection = $this->resourceConnection->getConnection();
-            $tableName = $this->resourceConnection->getTableName('defox_seosuite_sitemap_stats');
-            
-            $cutoffDate = $this->dateTime->gmtDate('Y-m-d H:i:s', time() - ($daysToKeep * 24 * 3600));
-            
-            $deletedRows = $connection->delete(
-                $tableName,
-                ['generation_time < ?' => $cutoffDate]
-            );
-
-            $this->logger->info(sprintf('Cleaned %d old sitemap statistics records', $deletedRows));
-            
-            return $deletedRows;
-        } catch (\Exception $e) {
-            $this->logger->error('Failed to clean old statistics: ' . $e->getMessage());
-            return 0;
-        }
     }
 
     /**

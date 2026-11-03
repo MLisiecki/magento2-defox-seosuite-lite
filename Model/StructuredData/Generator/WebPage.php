@@ -11,7 +11,6 @@ declare(strict_types=1);
 namespace Defox\SEOSuite\Model\StructuredData\Generator;
 
 use Defox\SEOSuite\Model\StructuredData\AbstractGenerator;
-use Magento\Cms\Api\Data\PageInterface;
 use Magento\Cms\Model\Page;
 use Magento\Cms\Helper\Page as PageHelper;
 use Magento\Store\Model\ScopeInterface;
@@ -38,9 +37,13 @@ class WebPage extends AbstractGenerator
         $data = [
             '@type' => 'WebPage',
             'name' => $page->getTitle(),
-            'url' => $this->getPageUrl($page),
-            'description' => $this->getPageDescription($page)
+            'url' => $this->getPageUrl($page)
         ];
+
+        $description = $this->getPageDescription($page);
+        if ($description !== '') {
+            $data['description'] = $description;
+        }
         
         // Add dates
         if ($page->getCreationTime()) {
@@ -56,31 +59,65 @@ class WebPage extends AbstractGenerator
             $data['breadcrumb'] = $this->generateBreadcrumb($context['breadcrumb']);
         }
         
-        // Add main entity of page if it's about page
+        // Organization (full data, one guard): "about" on an AboutPage, "publisher" on every page
+        $organization = $this->organizationData->getNamedData();
         if ($this->isAboutPage($page)) {
-            $data['mainEntityOfPage'] = $this->getAboutOrganization();
-        }
-        
-        // Add publisher (organization) with FULL data from SEO Suite config
-        if ($this->configHelper->isStructuredDataOrganizationEnabled()) {
-            $organization = $this->getFullOrganizationData();
-            if (!empty($organization)) {
-                $data['publisher'] = $organization;
+            $data['@type'] = 'AboutPage';
+            if ($organization !== null) {
+                $data['about'] = $organization;
             }
+        }
+        if ($organization !== null) {
+            $data['publisher'] = $organization;
         }
         
         return $data;
     }
     
     /**
+     * Words that identify article/blog pages (Article generator handles those, WebPage skips them).
+     * UTF-8 + caseless (/iu), anchored at a word start so "history" or "myblog" do not match; plurals still do.
+     * ponytail: keyword heuristic, a CMS page attribute ("is article") is the upgrade path if it misfires.
+     */
+    private const ARTICLE_PATTERN = '/(?<![\p{L}\p{N}])(?:blog|article|news|post|story|aktualno[sś]ci|artyku[lł]|wpis|nowo[sś]ci)/iu';
+
+    /**
+     * "About us" page words (UTF-8, caseless, word start; "o nas"/"o naszej firmie" must end the word so "o naszej ofercie" does not match)
+     */
+    private const ABOUT_PATTERN = '/(?<![\p{L}\p{N}])(?:about|o[ -]nas(?:zej[ -]firmie)?(?![\p{L}\p{N}]))/iu';
+
+    /**
      * Check if generator can handle entity
+     * Excludes pages that the Article generator handles to prevent duplicates.
      *
      * @param mixed $entity
      * @return bool
      */
     public function canHandle($entity): bool
     {
-        return $entity instanceof PageInterface || $entity instanceof Page;
+        return $entity instanceof Page && !$this->isArticleLikePage($entity);
+    }
+
+    /**
+     * Check if page looks like an article/blog post (the one detection used by WebPage and Article)
+     *
+     * @param Page $page
+     * @return bool
+     */
+    protected function isArticleLikePage(Page $page): bool
+    {
+        if (preg_match(self::ARTICLE_PATTERN, (string)$page->getIdentifier())
+            || preg_match(self::ARTICLE_PATTERN, (string)$page->getTitle())
+        ) {
+            return true;
+        }
+
+        $layout = (string)$page->getPageLayout();
+        if (strpos($layout, 'article') !== false) {
+            return true;
+        }
+
+        return false;
     }
     
     /**
@@ -102,17 +139,6 @@ class WebPage extends AbstractGenerator
     public function isEnabled(?int $storeId = null): bool
     {
         return $this->configHelper->isStructuredDataEnabled($storeId);
-    }
-    
-    /**
-     * Get entity ID
-     *
-     * @param mixed $entity
-     * @return string|null
-     */
-    protected function getEntityId($entity): ?string
-    {
-        return $entity->getId() ? 'cms_page_' . $entity->getId() : null;
     }
     
     /**
@@ -153,12 +179,11 @@ class WebPage extends AbstractGenerator
             ScopeInterface::SCOPE_STORE
         );
         
-        // Check if current page is the configured home page
-        if ($homePageId && $page->getIdentifier() === $homePageId) {
-            return true;
-        }
-        
-        return false;
+        // Value is "identifier", "identifier|id" (duplicate identifiers) or a page ID, as Cms\Helper\Page::prepareResultPage reads it
+        $homePageId = explode('|', (string)$homePageId)[0];
+
+        return $homePageId !== ''
+            && ($homePageId === (string)$page->getIdentifier() || $homePageId === (string)$page->getId());
     }
     
     /**
@@ -174,8 +199,8 @@ class WebPage extends AbstractGenerator
         
         if (!$description) {
             // Extract from content using HTML cleaning method
-            $description = $this->extractCleanText($page->getContent(), 2); // First 2 sentences
-            if (strlen($description) > 160) {
+            $description = $this->extractCleanText((string)$page->getContent(), 2); // First 2 sentences
+            if (mb_strlen($description, 'UTF-8') > 160) {
                 $description = $this->cleanHtml($description, 160);
             }
         } else {
@@ -194,33 +219,8 @@ class WebPage extends AbstractGenerator
      */
     private function isAboutPage(Page $page): bool
     {
-        $identifier = strtolower($page->getIdentifier());
-        $title = strtolower($page->getTitle());
-        
-        return strpos($identifier, 'about') !== false || 
-               strpos($title, 'about') !== false ||
-               strpos($identifier, 'o-nas') !== false ||
-               strpos($title, 'o nas') !== false;
-    }
-    
-    /**
-     * Get organization data for about page
-     *
-     * @return array
-     */
-    private function getAboutOrganization(): array
-    {
-        $data = [
-            '@type' => $this->configHelper->getStructuredDataOrganizationType() ?: 'Organization',
-            'name' => $this->configHelper->getStructuredDataOrganizationName()
-        ];
-        
-        $description = $this->configHelper->getStructuredDataOrganizationDescription();
-        if ($description) {
-            $data['description'] = $description;
-        }
-        
-        return $data;
+        return preg_match(self::ABOUT_PATTERN, (string)$page->getIdentifier()) === 1
+            || preg_match(self::ABOUT_PATTERN, (string)$page->getTitle()) === 1;
     }
     
     /**
@@ -242,216 +242,13 @@ class WebPage extends AbstractGenerator
                 $breadcrumbList['itemListElement'][] = [
                     '@type' => 'ListItem',
                     'position' => $position,
-                    'item' => [
-                        '@type' => 'Thing',
-                        '@id' => $item['link'],
-                        'name' => $item['label']
-                    ]
+                    'name' => $item['label'],
+                    'item' => $item['link']
                 ];
                 $position++;
             }
         }
         
         return $breadcrumbList;
-    }
-    
-    /**
-     * Get full organization data from SEO Suite configuration
-     *
-     * @return array
-     */
-    private function getFullOrganizationData(): array
-    {
-        $organizationName = $this->configHelper->getStructuredDataOrganizationName();
-        if (!$organizationName) {
-            return [];
-        }
-        
-        $baseUrl = $this->storeManager->getStore()->getBaseUrl();
-        
-        $organization = [
-            '@type' => $this->configHelper->getStructuredDataOrganizationType() ?: 'Organization',
-            'name' => $organizationName,
-            'url' => $baseUrl
-        ];
-        
-        // Add fields only if they have values
-        $this->addIfNotEmpty($organization, 'logo', $this->getLogoUrl($this->configHelper->getStructuredDataOrganizationLogo()));
-        $this->addIfNotEmpty($organization, 'description', $this->configHelper->getStructuredDataOrganizationDescription());
-        $this->addIfNotEmpty($organization, 'foundingDate', $this->configHelper->getStructuredDataOrganizationFoundingDate());
-        $this->addIfNotEmpty($organization, 'taxID', $this->configHelper->getStructuredDataOrganizationTaxId());
-        $this->addIfNotEmpty($organization, 'vatID', $this->configHelper->getStructuredDataOrganizationVatId());
-        
-        // Add address only if it has data
-        $address = $this->getOrganizationAddress();
-        if (!empty($address)) {
-            $organization['address'] = $address;
-        }
-        
-        // Add contact points only if they exist
-        $contactPoints = $this->getOrganizationContactPoints();
-        if (!empty($contactPoints)) {
-            $organization['contactPoint'] = count($contactPoints) === 1 ? $contactPoints[0] : $contactPoints;
-        }
-        
-        // Add social media profiles only if they exist
-        $socialProfiles = $this->getOrganizationSocialProfiles();
-        if (!empty($socialProfiles)) {
-            $organization['sameAs'] = $socialProfiles;
-        }
-        
-        // Add area served only if configured
-        $areaServed = $this->configHelper->getStructuredDataOrganizationAreaServed();
-        if (!empty($areaServed)) {
-            $organization['areaServed'] = $areaServed;
-        }
-        
-        return $organization;
-    }
-    
-    /**
-     * Add field to array only if value is not empty
-     *
-     * @param array $array
-     * @param string $key
-     * @param mixed $value
-     */
-    private function addIfNotEmpty(array &$array, string $key, $value): void
-    {
-        if ($value !== null && $value !== '' && $value !== []) {
-            $array[$key] = $value;
-        }
-    }
-    
-    /**
-     * Get organization address
-     *
-     * @return array
-     */
-    private function getOrganizationAddress(): array
-    {
-        $address = [];
-        
-        $streetAddress = $this->configHelper->getStructuredDataOrganizationStreetAddress();
-        $locality = $this->configHelper->getStructuredDataOrganizationLocality();
-        $region = $this->configHelper->getStructuredDataOrganizationRegion();
-        $postalCode = $this->configHelper->getStructuredDataOrganizationPostalCode();
-        $country = $this->configHelper->getStructuredDataOrganizationCountry();
-        
-        // Only create address if at least one field has value
-        if ($streetAddress || $locality || $region || $postalCode || $country) {
-            $address = ['@type' => 'PostalAddress'];
-            
-            $this->addIfNotEmpty($address, 'streetAddress', $streetAddress);
-            $this->addIfNotEmpty($address, 'addressLocality', $locality);
-            $this->addIfNotEmpty($address, 'addressRegion', $region);
-            $this->addIfNotEmpty($address, 'postalCode', $postalCode);
-            $this->addIfNotEmpty($address, 'addressCountry', $country);
-        }
-        
-        return $address;
-    }
-    
-    /**
-     * Get organization contact points
-     *
-     * @return array
-     */
-    private function getOrganizationContactPoints(): array
-    {
-        $contactPoints = [];
-        $availableLanguages = $this->configHelper->getStructuredDataOrganizationAvailableLanguages();
-        
-        // Customer Service
-        $customerPhone = $this->configHelper->getStructuredDataOrganizationCustomerServicePhone();
-        $customerEmail = $this->configHelper->getStructuredDataOrganizationCustomerServiceEmail();
-        if ($customerPhone || $customerEmail) {
-            $contact = [
-                '@type' => 'ContactPoint',
-                'contactType' => 'customer service'
-            ];
-            $this->addIfNotEmpty($contact, 'telephone', $customerPhone);
-            $this->addIfNotEmpty($contact, 'email', $customerEmail);
-            $this->addIfNotEmpty($contact, 'availableLanguage', $availableLanguages);
-            $contactPoints[] = $contact;
-        }
-        
-        // Technical Support
-        $techPhone = $this->configHelper->getStructuredDataOrganizationTechSupportPhone();
-        $techEmail = $this->configHelper->getStructuredDataOrganizationTechSupportEmail();
-        if ($techPhone || $techEmail) {
-            $contact = [
-                '@type' => 'ContactPoint',
-                'contactType' => 'technical support'
-            ];
-            $this->addIfNotEmpty($contact, 'telephone', $techPhone);
-            $this->addIfNotEmpty($contact, 'email', $techEmail);
-            $this->addIfNotEmpty($contact, 'availableLanguage', $availableLanguages);
-            $contactPoints[] = $contact;
-        }
-        
-        // Sales
-        $salesPhone = $this->configHelper->getStructuredDataOrganizationSalesPhone();
-        $salesEmail = $this->configHelper->getStructuredDataOrganizationSalesEmail();
-        if ($salesPhone || $salesEmail) {
-            $contact = [
-                '@type' => 'ContactPoint',
-                'contactType' => 'sales'
-            ];
-            $this->addIfNotEmpty($contact, 'telephone', $salesPhone);
-            $this->addIfNotEmpty($contact, 'email', $salesEmail);
-            $this->addIfNotEmpty($contact, 'availableLanguage', $availableLanguages);
-            $contactPoints[] = $contact;
-        }
-        
-        return $contactPoints;
-    }
-    
-    /**
-     * Get organization social media profiles
-     *
-     * @return array
-     */
-    private function getOrganizationSocialProfiles(): array
-    {
-        $profiles = [];
-        
-        $socialUrls = [
-            $this->configHelper->getStructuredDataOrganizationFacebook(),
-            $this->configHelper->getStructuredDataOrganizationTwitter(),
-            $this->configHelper->getStructuredDataOrganizationInstagram(),
-            $this->configHelper->getStructuredDataOrganizationYoutube(),
-            $this->configHelper->getStructuredDataOrganizationLinkedin(),
-            $this->configHelper->getStructuredDataOrganizationPinterest(),
-            $this->configHelper->getStructuredDataOrganizationTiktok()
-        ];
-        
-        foreach ($socialUrls as $url) {
-            if ($url && filter_var($url, FILTER_VALIDATE_URL)) {
-                $profiles[] = $url;
-            }
-        }
-        
-        return $profiles;
-    }
-    
-    /**
-     * Get logo URL
-     *
-     * @param string $logoPath
-     * @return string|null
-     */
-    private function getLogoUrl(string $logoPath = ''): ?string
-    {
-        if (empty($logoPath)) {
-            return null;
-        }
-        
-        if (filter_var($logoPath, FILTER_VALIDATE_URL)) {
-            return $logoPath;
-        }
-        
-        $baseUrl = $this->storeManager->getStore()->getBaseUrl(\Magento\Framework\UrlInterface::URL_TYPE_MEDIA);
-        return $baseUrl . 'logo/' . ltrim($logoPath, '/');
     }
 }

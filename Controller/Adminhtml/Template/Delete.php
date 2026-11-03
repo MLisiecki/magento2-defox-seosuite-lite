@@ -13,6 +13,7 @@ namespace Defox\SEOSuite\Controller\Adminhtml\Template;
 use Defox\SEOSuite\Api\TemplateRepositoryInterface;
 use Magento\Backend\App\Action;
 use Magento\Backend\App\Action\Context;
+use Magento\Framework\App\Action\HttpPostActionInterface;
 use Magento\Framework\Exception\LocalizedException;
 use Magento\Framework\Exception\NoSuchEntityException;
 
@@ -21,12 +22,12 @@ use Magento\Framework\Exception\NoSuchEntityException;
  * 
  * Deletes a meta tag template
  */
-class Delete extends Action
+class Delete extends Action implements HttpPostActionInterface
 {
     /**
      * Authorization level
      */
-    public const ADMIN_RESOURCE = 'Defox_SEOSuite::template';
+    public const ADMIN_RESOURCE = 'Defox_SEOSuite::template_delete';
 
     /**
      * @var TemplateRepositoryInterface

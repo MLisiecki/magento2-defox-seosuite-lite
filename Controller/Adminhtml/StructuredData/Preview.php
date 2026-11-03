@@ -14,6 +14,7 @@ use Magento\Backend\App\Action;
 use Magento\Backend\App\Action\Context;
 use Magento\Framework\View\Result\PageFactory;
 use Magento\Framework\Controller\Result\JsonFactory;
+use Defox\SEOSuite\Model\SafeErrorMessage;
 use Defox\SEOSuite\Model\StructuredData\GeneratorPool;
 use Defox\SEOSuite\Model\StructuredData\Renderer\JsonLd;
 use Defox\SEOSuite\Model\StructuredData\Validator\SchemaValidator;
@@ -78,6 +79,11 @@ class Preview extends Action
      * @var LoggerInterface
      */
     private LoggerInterface $logger;
+
+    /**
+     * @var SafeErrorMessage
+     */
+    private SafeErrorMessage $safeErrorMessage;
     
     /**
      * Constructor
@@ -92,6 +98,7 @@ class Preview extends Action
      * @param CategoryRepositoryInterface $categoryRepository
      * @param PageRepositoryInterface $pageRepository
      * @param LoggerInterface $logger
+     * @param SafeErrorMessage $safeErrorMessage
      */
     public function __construct(
         Context $context,
@@ -103,7 +110,8 @@ class Preview extends Action
         ProductRepositoryInterface $productRepository,
         CategoryRepositoryInterface $categoryRepository,
         PageRepositoryInterface $pageRepository,
-        LoggerInterface $logger
+        LoggerInterface $logger,
+        SafeErrorMessage $safeErrorMessage
     ) {
         parent::__construct($context);
         $this->resultPageFactory = $resultPageFactory;
@@ -115,6 +123,7 @@ class Preview extends Action
         $this->categoryRepository = $categoryRepository;
         $this->pageRepository = $pageRepository;
         $this->logger = $logger;
+        $this->safeErrorMessage = $safeErrorMessage;
     }
     
     /**
@@ -169,7 +178,7 @@ class Preview extends Action
             } catch (\Exception $e) {
                 return $result->setData([
                     'success' => false,
-                    'message' => __('Error loading entity: %1', $e->getMessage())
+                    'message' => __('Error loading entity: %1', $this->safeErrorMessage->get($e))
                 ]);
             }
             
@@ -183,15 +192,10 @@ class Preview extends Action
             // Generate structured data with error handling
             try {
                 $structuredData = $this->generatorPool->generate($entity);
-                
-                // Debug logging
-                $this->logger->info('Generated structured data count: ' . count($structuredData));
-                $this->logger->info('Generated structured data: ' . json_encode($structuredData));
-                
             } catch (\Exception $e) {
                 return $result->setData([
                     'success' => false,
-                    'message' => __('Error generating structured data: %1', $e->getMessage())
+                    'message' => __('Error generating structured data: %1', $this->safeErrorMessage->get($e))
                 ]);
             }
             
@@ -214,7 +218,7 @@ class Preview extends Action
             } catch (\Exception $e) {
                 return $result->setData([
                     'success' => false,
-                    'message' => __('Error rendering JSON-LD: %1', $e->getMessage())
+                    'message' => __('Error rendering JSON-LD: %1', $this->safeErrorMessage->get($e))
                 ]);
             }
             
@@ -234,7 +238,7 @@ class Preview extends Action
                 $errors = $this->schemaValidator->getErrors();
                 $warnings = $this->schemaValidator->getWarnings();
             } catch (\Exception $e) {
-                $warnings[] = 'Validation error: ' . $e->getMessage();
+                $warnings[] = 'Validation error: ' . $this->safeErrorMessage->get($e);
             }
             
             return $result->setData([
@@ -255,13 +259,12 @@ class Preview extends Action
         } catch (\Exception $e) {
             // Log the full error for debugging
             $this->logger->error('Structured data preview error: ' . $e->getMessage(), [
-                'exception' => $e,
-                'request_params' => $this->getRequest()->getParams()
+                'exception' => $e
             ]);
             
             return $result->setData([
                 'success' => false,
-                'message' => __('An unexpected error occurred: %1', $e->getMessage())
+                'message' => __('An unexpected error occurred. Please check the log for details.')
             ]);
         }
     }
@@ -304,7 +307,7 @@ class Preview extends Action
                     throw new \Exception("Unsupported entity type: $type");
             }
         } catch (\Magento\Framework\Exception\NoSuchEntityException $e) {
-            throw new \Exception("Entity not found: {$e->getMessage()}");
+            throw $e; // LocalizedException: its text is safe to show
         } catch (\Exception $e) {
             // Re-throw with more context
             throw new \Exception("Error loading $type with ID $id: {$e->getMessage()}");

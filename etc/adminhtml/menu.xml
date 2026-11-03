@@ -18,9 +18,9 @@
         <add id="Defox_SEOSuite::structured_data_preview" title="Structured Data Preview" translate="title" module="Defox_SEOSuite" sortOrder="55" parent="Defox_SEOSuite::seosuite" action="defox_seosuite/structuredData/preview" resource="Defox_SEOSuite::structured_data_preview"/>
         <add id="Defox_SEOSuite::settings" title="Settings" translate="title" module="Defox_SEOSuite" sortOrder="60" parent="Defox_SEOSuite::seosuite" action="adminhtml/system_config/edit/section/defox_seosuite" resource="Defox_SEOSuite::settings"/>
 
-        <add id="Defox_SEOSuite::sitemap_index" title="Przegląd" translate="title" module="Defox_SEOSuite" sortOrder="10" parent="Defox_SEOSuite::sitemap_management" action="defox_seosuite/sitemap/index" resource="Defox_SEOSuite::sitemap"/>
-        <add id="Defox_SEOSuite::sitemap_generate" title="Generowanie" translate="title" module="Defox_SEOSuite" sortOrder="20" parent="Defox_SEOSuite::sitemap_management" action="defox_seosuite/sitemap/generate" resource="Defox_SEOSuite::sitemap_generate"/>
-        <add id="Defox_SEOSuite::sitemap_validate" title="Walidacja" translate="title" module="Defox_SEOSuite" sortOrder="30" parent="Defox_SEOSuite::sitemap_management" action="defox_seosuite/sitemap/validate" resource="Defox_SEOSuite::sitemap_validate"/>
-        <add id="Defox_SEOSuite::sitemap_dashboard" title="Analityka" translate="title" module="Defox_SEOSuite" sortOrder="40" parent="Defox_SEOSuite::sitemap_management" action="defox_seosuite/sitemap/dashboard" resource="Defox_SEOSuite::sitemap_dashboard"/>
+        <add id="Defox_SEOSuite::sitemap_index" title="Overview" translate="title" module="Defox_SEOSuite" sortOrder="10" parent="Defox_SEOSuite::sitemap_management" action="defox_seosuite/sitemap/index" resource="Defox_SEOSuite::sitemap"/>
+        <add id="Defox_SEOSuite::sitemap_generate" title="Generation" translate="title" module="Defox_SEOSuite" sortOrder="20" parent="Defox_SEOSuite::sitemap_management" action="defox_seosuite/sitemap/generate" resource="Defox_SEOSuite::sitemap_generate"/>
+        <add id="Defox_SEOSuite::sitemap_validate" title="Validation" translate="title" module="Defox_SEOSuite" sortOrder="30" parent="Defox_SEOSuite::sitemap_management" action="defox_seosuite/sitemap/validate" resource="Defox_SEOSuite::sitemap_validate"/>
+        <add id="Defox_SEOSuite::sitemap_dashboard" title="Analytics" translate="title" module="Defox_SEOSuite" sortOrder="40" parent="Defox_SEOSuite::sitemap_management" action="defox_seosuite/sitemap/dashboard" resource="Defox_SEOSuite::sitemap_dashboard"/>
     </menu>
 </config>

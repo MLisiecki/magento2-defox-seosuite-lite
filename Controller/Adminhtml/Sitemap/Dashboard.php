@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace Defox\SEOSuite\Controller\Adminhtml\Sitemap;
 
+use Defox\SEOSuite\Model\SafeErrorMessage;
 use Defox\SEOSuite\Model\Sitemap\Analytics\StatisticsManager;
 use Magento\Backend\App\Action;
 use Magento\Backend\App\Action\Context;
@@ -55,6 +56,11 @@ class Dashboard extends Action implements HttpGetActionInterface
     private StoreManagerInterface $storeManager;
 
     /**
+     * @var SafeErrorMessage
+     */
+    private SafeErrorMessage $safeErrorMessage;
+
+    /**
      * Constructor
      *
      * @param Context $context
@@ -62,19 +68,22 @@ class Dashboard extends Action implements HttpGetActionInterface
      * @param JsonFactory $resultJsonFactory
      * @param StatisticsManager $statisticsManager
      * @param StoreManagerInterface $storeManager
+     * @param SafeErrorMessage $safeErrorMessage
      */
     public function __construct(
         Context $context,
         PageFactory $resultPageFactory,
         JsonFactory $resultJsonFactory,
         StatisticsManager $statisticsManager,
-        StoreManagerInterface $storeManager
+        StoreManagerInterface $storeManager,
+        SafeErrorMessage $safeErrorMessage
     ) {
         parent::__construct($context);
         $this->resultPageFactory = $resultPageFactory;
         $this->resultJsonFactory = $resultJsonFactory;
         $this->statisticsManager = $statisticsManager;
         $this->storeManager = $storeManager;
+        $this->safeErrorMessage = $safeErrorMessage;
     }
 
     /**
@@ -155,7 +164,7 @@ class Dashboard extends Action implements HttpGetActionInterface
         } catch (\Exception $e) {
             return $result->setData([
                 'error' => true,
-                'message' => __('Error loading dashboard data: %1', $e->getMessage())
+                'message' => __('Error loading dashboard data: %1', $this->safeErrorMessage->get($e))
             ]);
         }
     }
@@ -227,7 +236,7 @@ class Dashboard extends Action implements HttpGetActionInterface
         } catch (\Exception $e) {
             return [
                 'success' => false,
-                'error' => $e->getMessage()
+                'error' => $this->safeErrorMessage->get($e)
             ];
         }
     }
@@ -296,7 +305,7 @@ class Dashboard extends Action implements HttpGetActionInterface
         } catch (\Exception $e) {
             return [
                 'success' => false,
-                'error' => $e->getMessage()
+                'error' => $this->safeErrorMessage->get($e)
             ];
         }
     }
@@ -361,7 +370,7 @@ class Dashboard extends Action implements HttpGetActionInterface
         } catch (\Exception $e) {
             return [
                 'success' => false,
-                'error' => $e->getMessage()
+                'error' => $this->safeErrorMessage->get($e)
             ];
         }
     }
@@ -423,7 +432,7 @@ class Dashboard extends Action implements HttpGetActionInterface
         } catch (\Exception $e) {
             return [
                 'success' => false,
-                'error' => $e->getMessage()
+                'error' => $this->safeErrorMessage->get($e)
             ];
         }
     }
@@ -451,7 +460,7 @@ class Dashboard extends Action implements HttpGetActionInterface
         } catch (\Exception $e) {
             return [
                 'success' => false,
-                'error' => $e->getMessage()
+                'error' => $this->safeErrorMessage->get($e)
             ];
         }
     }
@@ -509,7 +518,7 @@ class Dashboard extends Action implements HttpGetActionInterface
         } catch (\Exception $e) {
             return [
                 'success' => false,
-                'error' => $e->getMessage()
+                'error' => $this->safeErrorMessage->get($e)
             ];
         }
     }
@@ -585,7 +594,7 @@ class Dashboard extends Action implements HttpGetActionInterface
         } catch (\Exception $e) {
             return [
                 'success' => false,
-                'error' => $e->getMessage()
+                'error' => $this->safeErrorMessage->get($e)
             ];
         }
     }
@@ -621,7 +630,7 @@ class Dashboard extends Action implements HttpGetActionInterface
             $result = $this->resultJsonFactory->create();
             return $result->setData([
                 'success' => false,
-                'error' => $e->getMessage()
+                'error' => $this->safeErrorMessage->get($e)
             ]);
         }
     }
@@ -686,7 +695,7 @@ class Dashboard extends Action implements HttpGetActionInterface
         } catch (\Exception $e) {
             return [
                 'success' => false,
-                'error' => $e->getMessage()
+                'error' => $this->safeErrorMessage->get($e)
             ];
         }
     }
@@ -753,7 +762,7 @@ class Dashboard extends Action implements HttpGetActionInterface
         } catch (\Exception $e) {
             return [
                 'success' => false,
-                'error' => $e->getMessage()
+                'error' => $this->safeErrorMessage->get($e)
             ];
         }
     }

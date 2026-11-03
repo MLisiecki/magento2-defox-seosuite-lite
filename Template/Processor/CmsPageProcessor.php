@@ -10,13 +10,9 @@ declare(strict_types=1);
 
 namespace Defox\SEOSuite\Template\Processor;
 
-use Defox\SEOSuite\Helper\Data as SeoHelper;
 use Defox\SEOSuite\Template\AbstractVariableProcessor;
 use Magento\Cms\Api\Data\PageInterface;
 use Magento\Cms\Model\Page;
-use Magento\Framework\App\CacheInterface;
-use Magento\Framework\Escaper;
-use Magento\Store\Model\StoreManagerInterface;
 
 /**
  * Enhanced CMS Page variable processor
@@ -25,21 +21,6 @@ use Magento\Store\Model\StoreManagerInterface;
  */
 class CmsPageProcessor extends AbstractVariableProcessor
 {
-    /**
-     * @param SeoHelper $seoHelper
-     * @param StoreManagerInterface $storeManager
-     * @param Escaper $escaper
-     * @param CacheInterface $cache
-     */
-    public function __construct(
-        SeoHelper $seoHelper,
-        StoreManagerInterface $storeManager,
-        Escaper $escaper,
-        CacheInterface $cache
-    ) {
-        parent::__construct($seoHelper, $storeManager, $escaper, $cache);
-    }
-
     /**
      * @inheritdoc
      */
@@ -180,7 +161,7 @@ class CmsPageProcessor extends AbstractVariableProcessor
 
             default:
                 // Try custom attributes
-                return $this->getPageCustomAttribute($page, $property);
+                return $this->getEntityAttributeValue($page, $property);
         }
     }
 
@@ -240,39 +221,6 @@ class CmsPageProcessor extends AbstractVariableProcessor
     }
 
     /**
-     * Get page custom attribute
-     *
-     * @param PageInterface|Page $page
-     * @param string $attributeCode
-     * @return string
-     */
-    protected function getPageCustomAttribute($page, string $attributeCode): string
-    {
-        // Try getter method first
-        $method = 'get' . str_replace(' ', '', ucwords(str_replace('_', ' ', $attributeCode)));
-        if (method_exists($page, $method)) {
-            $value = $page->$method();
-            return $value !== null ? (string)$value : '';
-        }
-        
-        // Try custom attribute
-        if (method_exists($page, 'getCustomAttribute')) {
-            $attribute = $page->getCustomAttribute($attributeCode);
-            if ($attribute) {
-                return (string)$attribute->getValue();
-            }
-        }
-        
-        // Try getData
-        if (method_exists($page, 'getData')) {
-            $value = $page->getData($attributeCode);
-            return $value !== null ? (string)$value : '';
-        }
-        
-        return '';
-    }
-
-    /**
      * Clean HTML content with improved processing
      *
      * @param string $content
@@ -287,25 +235,18 @@ class CmsPageProcessor extends AbstractVariableProcessor
         // First, handle Page Builder content and directives
         $content = $this->processPageBuilderContent($content);
         
-        // Decode HTML entities carefully
-        $content = html_entity_decode($content, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-        
-        // Remove script and style tags with their content
-        $content = preg_replace('/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/mi', '', $content);
-        $content = preg_replace('/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/mi', '', $content);
-        
         // Convert some HTML elements to readable text
         $content = preg_replace('/<br\s*\/?>/i', ' ', $content);
         $content = preg_replace('/<\/p>/i', ' ', $content);
         $content = preg_replace('/<\/div>/i', ' ', $content);
         $content = preg_replace('/<\/h[1-6]>/i', ' ', $content);
         
-        // Remove all remaining HTML tags
-        $content = strip_tags($content);
+        // Decode entities, then remove real markup incl. script/style contents
+        $content = $this->textCleaner->clean($content);
         
         // Clean up whitespace and special characters
         $content = preg_replace('/\s+/', ' ', $content);
-        $content = preg_replace('/[^\w\s\-.,!?;:()\[\]"\'\/&]/', '', $content);
+        $content = preg_replace('/[^\w\s\-.,!?;:()\[\]"\'\/&<>]/u', '', $content) ?? $content;
         $content = trim($content);
         
         return $content;

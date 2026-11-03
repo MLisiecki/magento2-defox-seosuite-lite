@@ -7,7 +7,7 @@
 
 define([
     'jquery',
-    'chartjs',
+    'chartJs',
     'Magento_Ui/js/modal/alert'
 ], function ($, Chart, alert) {
     'use strict';
@@ -77,7 +77,7 @@ define([
                 });
                 
                 // Update status to show no data
-                $('.kpi-section .admin__data-grid-header .note').html('No sitemap generation data available yet. <a href="' + this.config.generateUrl + '">Generate your first sitemap</a> to start tracking statistics.');
+                $('.kpi-section .admin__data-grid-header .note').html('No sitemap generation data available yet. <a href="' + this.escapeHtml(this.config.generateUrl) + '">Generate your first sitemap</a> to start tracking statistics.');
             },
             
             // State
@@ -277,7 +277,7 @@ define([
                     
                     var statusHtml = 'Statistics for the last 30 days | Last generation: ' +
                         '<span class="status-' + statusClass + '">' + statusText + '</span> ' +
-                        '<span class="time">' + timeText + '</span>';
+                        '<span class="time">' + this.escapeHtml(timeText) + '</span>';
                     
                     $('.kpi-section .admin__data-grid-header .note').html(statusHtml);
                 }
@@ -672,7 +672,7 @@ define([
                 // Check if URLs are properly configured
                 if (!this.config.ajaxUrls || !this.config.ajaxUrls.recent_history) {
                     if (clearExisting) {
-                        $('#recent-history').html('<div class="no-data"><p>No generation history available yet.</p><p><a href="' + (this.config.generateUrl || '#') + '">Generate your first sitemap</a> to start tracking activity.</p></div>');
+                        $('#recent-history').html('<div class="no-data"><p>No generation history available yet.</p><p><a href="' + this.escapeHtml(this.config.generateUrl || '#') + '">Generate your first sitemap</a> to start tracking activity.</p></div>');
                     }
                     return;
                 }
@@ -705,7 +705,7 @@ define([
                     error: function (xhr, status, error) {
                         if (clearExisting) {
                             // Always show no data message instead of error
-                            $('#recent-history').html('<div class="no-data"><p>No generation history available yet.</p><p><a href="' + (self.config.generateUrl || '#') + '">Generate your first sitemap</a> to start tracking activity.</p></div>');
+                            $('#recent-history').html('<div class="no-data"><p>No generation history available yet.</p><p><a href="' + self.escapeHtml(self.config.generateUrl || '#') + '">Generate your first sitemap</a> to start tracking activity.</p></div>');
                         }
                     },
                     complete: function () {
@@ -758,22 +758,23 @@ define([
                 var self = this;
                 
                 data.forEach(function (item) {
-                    var rowHtml = '<tr data-stat-id="' + item.id + '">';
-                    rowHtml += '<td><strong>' + self.escapeHtml(item.store_name) + '</strong><br><small>ID: ' + item.store_id + '</small></td>';
-                    rowHtml += '<td>' + self.formatDateTime(item.generation_time) + '</td>';
-                    rowHtml += '<td><span class="' + item.status_class + '">' + item.status_text + '</span>';
+                    var esc = self.escapeHtml;
+                    var rowHtml = '<tr data-stat-id="' + esc(item.id) + '">';
+                    rowHtml += '<td><strong>' + esc(item.store_name) + '</strong><br><small>ID: ' + esc(item.store_id) + '</small></td>';
+                    rowHtml += '<td>' + esc(self.formatDateTime(item.generation_time)) + '</td>';
+                    rowHtml += '<td><span class="' + esc(item.status_class) + '">' + esc(item.status_text) + '</span>';
                     if (item.errors_count > 0) {
-                        rowHtml += '<br><small>' + item.errors_count + ' errors</small>';
+                        rowHtml += '<br><small>' + esc(item.errors_count) + ' errors</small>';
                     }
                     rowHtml += '</td>';
-                    rowHtml += '<td>' + item.duration + 's</td>';
-                    rowHtml += '<td>' + self.formatNumber(item.total_urls) + '</td>';
-                    rowHtml += '<td>' + item.files_generated + '</td>';
-                    rowHtml += '<td>' + item.file_size_mb + ' MB</td>';
+                    rowHtml += '<td>' + esc(item.duration) + 's</td>';
+                    rowHtml += '<td>' + esc(self.formatNumber(item.total_urls)) + '</td>';
+                    rowHtml += '<td>' + esc(item.files_generated) + '</td>';
+                    rowHtml += '<td>' + esc(item.file_size_mb) + ' MB</td>';
                     rowHtml += '<td>';
-                    rowHtml += '<button type="button" class="action-secondary action-small view-details" data-stat-id="' + item.id + '">Details</button>';
+                    rowHtml += '<button type="button" class="action-secondary action-small view-details" data-stat-id="' + esc(item.id) + '">Details</button>';
                     if (item.success) {
-                        rowHtml += ' <button type="button" class="action-primary action-small regenerate" data-store-id="' + item.store_id + '">Regenerate</button>';
+                        rowHtml += ' <button type="button" class="action-primary action-small regenerate" data-store-id="' + esc(item.store_id) + '">Regenerate</button>';
                     }
                     rowHtml += '</td>';
                     rowHtml += '</tr>';
@@ -824,22 +825,23 @@ define([
                     success: function (response) {
                         if (response.success && response.data) {
                             var stat = response.data;
+                            var esc = self.escapeHtml;
                             var content = '<div class="generation-details">';
-                            content += '<div class="detail-row"><strong>Store:</strong> ' + stat.store_name + ' (ID: ' + stat.store_id + ')</div>';
-                            content += '<div class="detail-row"><strong>Generation Time:</strong> ' + self.formatDateTime(stat.generation_time) + '</div>';
-                            content += '<div class="detail-row"><strong>Duration:</strong> ' + stat.duration + ' seconds</div>';
-                            content += '<div class="detail-row"><strong>Total URLs:</strong> ' + self.formatNumber(stat.total_urls) + '</div>';
-                            content += '<div class="detail-row"><strong>Files Generated:</strong> ' + stat.files_generated + '</div>';
-                            content += '<div class="detail-row"><strong>File Size:</strong> ' + stat.file_size_mb + ' MB</div>';
-                            content += '<div class="detail-row"><strong>Status:</strong> <span class="' + stat.status_class + '">' + stat.status_text + '</span></div>';
+                            content += '<div class="detail-row"><strong>Store:</strong> ' + esc(stat.store_name) + ' (ID: ' + esc(stat.store_id) + ')</div>';
+                            content += '<div class="detail-row"><strong>Generation Time:</strong> ' + esc(self.formatDateTime(stat.generation_time)) + '</div>';
+                            content += '<div class="detail-row"><strong>Duration:</strong> ' + esc(stat.duration) + ' seconds</div>';
+                            content += '<div class="detail-row"><strong>Total URLs:</strong> ' + esc(self.formatNumber(stat.total_urls)) + '</div>';
+                            content += '<div class="detail-row"><strong>Files Generated:</strong> ' + esc(stat.files_generated) + '</div>';
+                            content += '<div class="detail-row"><strong>File Size:</strong> ' + esc(stat.file_size_mb) + ' MB</div>';
+                            content += '<div class="detail-row"><strong>Status:</strong> <span class="' + esc(stat.status_class) + '">' + esc(stat.status_text) + '</span></div>';
                             if (stat.errors_count > 0) {
-                                content += '<div class="detail-row"><strong>Errors:</strong> ' + stat.errors_count + '</div>';
+                                content += '<div class="detail-row"><strong>Errors:</strong> ' + esc(stat.errors_count) + '</div>';
                             }
                             content += '</div>';
                             content += '<style>.generation-details { font-size: 14px; line-height: 1.6; } .detail-row { margin: 8px 0; padding: 4px 0; border-bottom: 1px solid #eee; } .detail-row:last-child { border-bottom: none; }</style>';
                             
                             alert({
-                                title: 'Generation Details - ID ' + statId,
+                                title: 'Generation Details - ID ' + self.escapeHtml(statId),
                                 content: content,
                                 buttons: [{
                                     text: 'Close',
@@ -852,7 +854,7 @@ define([
                         } else {
                             alert({
                                 title: 'Generation Details',
-                                content: 'Could not load detailed statistics for generation ID ' + statId + '.',
+                                content: 'Could not load detailed statistics for generation ID ' + self.escapeHtml(statId) + '.',
                                 buttons: [{
                                     text: 'Close',
                                     class: 'action-primary',
@@ -1088,7 +1090,7 @@ define([
                     '"': '&quot;',
                     "'": '&#039;'
                 };
-                return text.replace(/[&<>"']/g, function (m) { return map[m]; });
+                return String(text === null || text === undefined ? '' : text).replace(/[&<>"']/g, function (m) { return map[m]; });
             },
             
             /**

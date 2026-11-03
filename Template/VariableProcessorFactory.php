@@ -12,6 +12,7 @@ namespace Defox\SEOSuite\Template;
 
 use Magento\Framework\ObjectManagerInterface;
 use Magento\Framework\Exception\LocalizedException;
+use Psr\Log\LoggerInterface;
 
 /**
  * Variable processor factory
@@ -36,14 +37,22 @@ class VariableProcessorFactory
     private array $processors_instances = [];
 
     /**
+     * @var LoggerInterface
+     */
+    private LoggerInterface $logger;
+
+    /**
      * @param ObjectManagerInterface $objectManager
+     * @param LoggerInterface $logger
      * @param array $processors
      */
     public function __construct(
         ObjectManagerInterface $objectManager,
+        LoggerInterface $logger,
         array $processors = []
     ) {
         $this->objectManager = $objectManager;
+        $this->logger = $logger;
         $this->processors = $processors;
     }
 
@@ -83,6 +92,9 @@ class VariableProcessorFactory
                 }
             } catch (\Exception $e) {
                 // Log error and continue to next processor
+                $this->logger->warning(
+                    'Defox_SEOSuite: variable processor ' . $processorClass . ' failed: ' . $e->getMessage()
+                );
                 continue;
             }
         }

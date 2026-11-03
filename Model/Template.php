@@ -13,6 +13,7 @@ namespace Defox\SEOSuite\Model;
 use Defox\SEOSuite\Api\Data\TemplateInterface;
 use Defox\SEOSuite\Model\ResourceModel\Template as ResourceTemplate;
 use Magento\Framework\Data\Collection\AbstractDb;
+use Magento\Framework\DataObject\IdentityInterface;
 use Magento\Framework\Model\AbstractModel;
 use Magento\Framework\Model\Context;
 use Magento\Framework\Model\ResourceModel\AbstractResource;
@@ -23,8 +24,13 @@ use Magento\Framework\Registry;
  * 
  * This class represents a meta tags template and provides methods to manipulate its data
  */
-class Template extends AbstractModel implements TemplateInterface
+class Template extends AbstractModel implements TemplateInterface, IdentityInterface
 {
+    /**
+     * Tag on Manager's template lookups and on storefront entity pages (Model/MetaTag/PageCacheTags)
+     */
+    public const CACHE_TAG = 'DEFOX_SEO_METATAG';
+
     /**
      * Template types
      */
@@ -54,6 +60,13 @@ class Template extends AbstractModel implements TemplateInterface
     protected $_eventPrefix = 'defox_seosuite_template';
 
     /**
+     * Cleaned on save/delete (AbstractModel::cleanModelCache) so Manager's cached template lookups refresh
+     *
+     * @var string
+     */
+    protected $_cacheTag = self::CACHE_TAG;
+
+    /**
      * @param Context $context
      * @param Registry $registry
      * @param AbstractResource|null $resource
@@ -63,11 +76,21 @@ class Template extends AbstractModel implements TemplateInterface
     public function __construct(
         Context $context,
         Registry $registry,
-        AbstractResource $resource = null,
-        AbstractDb $resourceCollection = null,
+        ?AbstractResource $resource = null,
+        ?AbstractDb $resourceCollection = null,
         array $data = []
     ) {
         parent::__construct($context, $registry, $resource, $resourceCollection, $data);
+    }
+
+    /**
+     * Page cache tags: save/delete dispatches clean_cache_by_tags, which purges FPC/Varnish pages carrying this tag
+     *
+     * @return string[]
+     */
+    public function getIdentities(): array
+    {
+        return [self::CACHE_TAG];
     }
 
     /**

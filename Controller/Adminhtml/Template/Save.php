@@ -16,6 +16,7 @@ use Defox\SEOSuite\Model\Template;
 use Defox\SEOSuite\Model\TemplateFactory;
 use Magento\Backend\App\Action;
 use Magento\Backend\App\Action\Context;
+use Magento\Framework\App\Action\HttpPostActionInterface;
 use Magento\Framework\App\Request\DataPersistorInterface;
 use Magento\Framework\Exception\LocalizedException;
 
@@ -24,12 +25,21 @@ use Magento\Framework\Exception\LocalizedException;
  * 
  * Saves a meta tag template
  */
-class Save extends Action
+class Save extends Action implements HttpPostActionInterface
 {
     /**
      * Authorization level
      */
-    public const ADMIN_RESOURCE = 'Defox_SEOSuite::template';
+    public const ADMIN_RESOURCE = 'Defox_SEOSuite::template_save';
+
+    /**
+     * Fields of defox_seosuite_template_form.xml (template_id is taken from the loaded model only)
+     */
+    private const FORM_FIELDS = [
+        'name', 'type', 'entity_type', 'store_id', 'priority', 'is_active', 'conditions_serialized',
+        'meta_title_template', 'meta_description_template', 'meta_keywords_template', 'meta_robots_template',
+        'og_title_template', 'og_description_template', 'og_type_template', 'og_image_template',
+    ];
 
     /**
      * @var DataPersistorInterface
@@ -96,9 +106,8 @@ class Save extends Action
                 }
             }
 
-            $model->setData($data);
-
             try {
+                $model->addData($this->filterFormData($data));
                 $this->templateRepository->save($model);
                 $this->messageManager->addSuccessMessage(__('You saved the template.'));
                 $this->dataPersistor->clear('defox_seosuite_template');
@@ -118,5 +127,28 @@ class Save extends Action
         }
         
         return $resultRedirect->setPath('*/*/');
+    }
+
+    /**
+     * Keep only form fields and cast them to scalar column types
+     *
+     * @param array $data
+     * @return array
+     * @throws LocalizedException
+     */
+    private function filterFormData(array $data): array
+    {
+        $fields = array_intersect_key($data, array_flip(self::FORM_FIELDS));
+        foreach ($fields as $field => $value) {
+            if ($value !== null && !is_scalar($value)) {
+                throw new LocalizedException(__('Invalid value for "%1".', $field));
+            }
+            if (in_array($field, ['store_id', 'priority', 'is_active'], true)) {
+                $fields[$field] = (int)$value;
+            } elseif ($value !== null) {
+                $fields[$field] = (string)$value;
+            }
+        }
+        return $fields;
     }
 }

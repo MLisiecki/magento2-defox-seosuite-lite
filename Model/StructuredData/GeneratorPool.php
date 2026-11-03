@@ -78,8 +78,8 @@ class GeneratorPool
                         $structuredData[] = $data;
                     }
                 }
-            } catch (\Exception $e) {
-                $this->logger->error(
+            } catch (\Throwable $e) {
+                $this->logger->warning(
                     sprintf(
                         'Error generating structured data with %s: %s',
                         is_string($generatorClass) ? $generatorClass : get_class($generatorClass),
@@ -136,8 +136,8 @@ class GeneratorPool
                     $this->logger->error('Generator class does not implement GeneratorInterface: ' . $generatorClass);
                     return null;
                 }
-            } catch (\Exception $e) {
-                $this->logger->error('Error creating generator instance: ' . $generatorClass . ' - ' . $e->getMessage());
+            } catch (\Throwable $e) {
+                $this->logger->warning('Error creating generator instance: ' . $generatorClass . ' - ' . $e->getMessage());
                 return null;
             }
         }
@@ -160,32 +160,5 @@ class GeneratorPool
             }
         }
         return $instances;
-    }
-    
-    /**
-     * Get enabled generators
-     *
-     * @param int|null $storeId
-     * @return GeneratorInterface[]
-     */
-    public function getEnabledGenerators(?int $storeId = null): array
-    {
-        return array_filter(
-            $this->getGenerators(),
-            function (GeneratorInterface $generator) use ($storeId) {
-                return $generator->isEnabled($storeId);
-            }
-        );
-    }
-    
-    /**
-     * Add generator to pool
-     *
-     * @param GeneratorInterface $generator
-     * @return void
-     */
-    public function addGenerator(GeneratorInterface $generator): void
-    {
-        $this->generators[] = $generator;
     }
 }

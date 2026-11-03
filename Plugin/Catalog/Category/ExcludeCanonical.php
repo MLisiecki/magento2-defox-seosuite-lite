@@ -13,7 +13,6 @@ namespace Defox\SEOSuite\Plugin\Catalog\Category;
 use Magento\Catalog\Model\Category;
 use Magento\Catalog\Model\Category\DataProvider;
 use Magento\Framework\App\RequestInterface;
-use Magento\Framework\Registry;
 
 /**
  * Plugin to add canonical exclusion option to category form
@@ -21,24 +20,16 @@ use Magento\Framework\Registry;
 class ExcludeCanonical
 {
     /**
-     * @var Registry
-     */
-    private Registry $registry;
-
-    /**
      * @var RequestInterface
      */
     private RequestInterface $request;
 
     /**
-     * @param Registry $registry
      * @param RequestInterface $request
      */
     public function __construct(
-        Registry $registry,
         RequestInterface $request
     ) {
-        $this->registry = $registry;
         $this->request = $request;
     }
 
@@ -90,7 +81,7 @@ class ExcludeCanonical
         $categoryId = $this->request->getParam('id');
         
         if ($categoryId && isset($result[$categoryId])) {
-            $category = $this->registry->registry('category');
+            $category = $subject->getCurrentCategory();
             
             if ($category instanceof Category) {
                 $seoCanonicalDisabled = $category->getData('seo_canonical_disabled') ?? 0;

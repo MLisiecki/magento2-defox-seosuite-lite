@@ -11,7 +11,6 @@ declare(strict_types=1);
 namespace Defox\SEOSuite\Plugin\Head;
 
 use Defox\SEOSuite\Model\Canonical\RobotsHandler;
-use Magento\Framework\View\Page\Config;
 use Magento\Framework\View\Page\Config\Renderer;
 
 /**

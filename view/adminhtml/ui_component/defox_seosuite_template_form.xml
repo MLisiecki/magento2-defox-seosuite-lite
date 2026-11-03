@@ -2,7 +2,7 @@
 <!--
 /**
  * @package     Defox_SEOSuite
- * @copyright   Copyright (c) 2024 Defox (https://defox.com)
+ * @copyright   Copyright (c) 2024 Defox (https://defox.pl)
  * @license     Defox Proprietary License
  */
 -->
@@ -397,7 +397,7 @@ Leave empty to apply to all entities of the selected type.</item>
         <container name="available_variables">
             <argument name="data" xsi:type="array">
                 <item name="config" xsi:type="array">
-                    <item name="component" xsi:type="string">Magento_Ui/js/form/components/html</item>
+                    <item name="component" xsi:type="string">Defox_SEOSuite/js/form/components/variables-help</item>
                     <item name="additionalClasses" xsi:type="string">admin__field-note</item>
                     <item name="content" xsi:type="string" translate="true"><![CDATA[
                         <div id="defox-variables-display" style="background: #f9f9f9; border: 1px solid #ddd; padding: 15px; border-radius: 4px; margin-top: 10px;">
@@ -454,30 +454,6 @@ Leave empty to apply to all entities of the selected type.</item>
                             </div>
                         </div>
                         
-                        <script type="text/javascript">
-                        require(['jquery'], function($) {
-                            $('#defox-variables-display code').on('click', function() {
-                                var text = $(this).text();
-                                
-                                // Create temporary textarea to copy text
-                                var $temp = $("<textarea>");
-                                $("body").append($temp);
-                                $temp.val(text).select();
-                                document.execCommand("copy");
-                                $temp.remove();
-                                
-                                // Show notification
-                                var notification = $('<div class="message message-success" style="position: fixed; top: 50px; right: 20px; z-index: 9999; padding: 10px; background: #4CAF50; color: white; border-radius: 4px;">Variable copied: ' + text + '</div>');
-                                $('body').append(notification);
-                                
-                                setTimeout(function() {
-                                    notification.fadeOut(function() {
-                                        $(this).remove();
-                                    });
-                                }, 3000);
-                            });
-                        });
-                        </script>
                     ]]></item>
                 </item>
             </argument>

@@ -11,7 +11,7 @@ declare(strict_types=1);
 namespace Defox\SEOSuite\Model\StructuredData;
 
 use Defox\SEOSuite\Helper\Config;
-use Defox\SEOSuite\Model\Cache\CacheManager;
+use Defox\SEOSuite\Model\Text\Cleaner;
 use Magento\Framework\App\Config\ScopeConfigInterface;
 use Magento\Store\Model\StoreManagerInterface;
 use Psr\Log\LoggerInterface;
@@ -20,24 +20,14 @@ use Psr\Log\LoggerInterface;
  * Abstract base class for structured data generators
  * 
  * This class provides common functionality for all structured data generators,
- * including configuration management, caching, and error handling.
+ * including configuration management and error handling.
  */
 abstract class AbstractGenerator implements GeneratorInterface
 {
     /**
-     * Cache tag for structured data
-     */
-    const CACHE_TAG = 'defox_seosuite_structured_data';
-    
-    /**
      * @var Config
      */
     protected Config $configHelper;
-    
-    /**
-     * @var CacheManager
-     */
-    protected CacheManager $cacheManager;
     
     /**
      * @var StoreManagerInterface
@@ -53,32 +43,48 @@ abstract class AbstractGenerator implements GeneratorInterface
      * @var ScopeConfigInterface
      */
     protected ScopeConfigInterface $scopeConfig;
+
+    /**
+     * @var Cleaner
+     */
+    protected Cleaner $textCleaner;
+
+    /**
+     * @var OrganizationDataProvider
+     */
+    protected OrganizationDataProvider $organizationData;
     
     /**
      * Constructor
      *
      * @param Config $configHelper
-     * @param CacheManager $cacheManager
      * @param StoreManagerInterface $storeManager
      * @param LoggerInterface $logger
      * @param ScopeConfigInterface $scopeConfig
+     * @param Cleaner $textCleaner
+     * @param OrganizationDataProvider $organizationData
      */
     public function __construct(
         Config $configHelper,
-        CacheManager $cacheManager,
         StoreManagerInterface $storeManager,
         LoggerInterface $logger,
-        ScopeConfigInterface $scopeConfig
+        ScopeConfigInterface $scopeConfig,
+        Cleaner $textCleaner,
+        OrganizationDataProvider $organizationData
     ) {
         $this->configHelper = $configHelper;
-        $this->cacheManager = $cacheManager;
         $this->storeManager = $storeManager;
         $this->logger = $logger;
         $this->scopeConfig = $scopeConfig;
+        $this->textCleaner = $textCleaner;
+        $this->organizationData = $organizationData;
     }
     
     /**
-     * Generate structured data with caching support
+     * Generate structured data
+     *
+     * ponytail: no module cache — FPC already caches the page per store/currency/customer group and is purged by
+     * the entity's identities, so a second 24 h cache only served stale prices/stock (CR-11, INV-6).
      *
      * @param mixed $entity
      * @param array $context
@@ -90,36 +96,10 @@ abstract class AbstractGenerator implements GeneratorInterface
             return [];
         }
         
-        $cacheKey = $this->getCacheKey($entity, $context);
-        
-        // Try to get from cache
-        if ($this->isCacheEnabled()) {
-            $cachedData = $this->cacheManager->load($cacheKey);
-            if ($cachedData !== false) {
-                return json_decode($cachedData, true) ?: [];
-            }
-        }
-        
         try {
-            // Generate structured data
-            $data = $this->doGenerate($entity, $context);
-            
-            // Add common fields
-            $data = $this->addCommonFields($data);
-            
-            // Save to cache
-            if ($this->isCacheEnabled() && !empty($data)) {
-                $this->cacheManager->save(
-                    json_encode($data),
-                    $cacheKey,
-                    [self::CACHE_TAG, $this->getSchemaType()],
-                    $this->getCacheLifetime()
-                );
-            }
-            
-            return $data;
-        } catch (\Exception $e) {
-            $this->logger->error(
+            return $this->addCommonFields($this->doGenerate($entity, $context));
+        } catch (\Throwable $e) {
+            $this->logger->warning(
                 sprintf(
                     'Error generating structured data for %s: %s',
                     $this->getSchemaType(),
@@ -139,34 +119,6 @@ abstract class AbstractGenerator implements GeneratorInterface
      * @return array
      */
     abstract protected function doGenerate($entity, array $context): array;
-    
-    /**
-     * Get cache key for entity
-     *
-     * @param mixed $entity
-     * @param array $context
-     * @return string
-     */
-    protected function getCacheKey($entity, array $context): string
-    {
-        $keyParts = [
-            'structured_data',
-            $this->getSchemaType(),
-            $this->getEntityId($entity),
-            $this->storeManager->getStore()->getId(),
-            md5(json_encode($context))
-        ];
-        
-        return implode('_', array_filter($keyParts));
-    }
-    
-    /**
-     * Get entity ID for cache key
-     *
-     * @param mixed $entity
-     * @return string|null
-     */
-    abstract protected function getEntityId($entity): ?string;
     
     /**
      * Add common fields to structured data
@@ -191,26 +143,6 @@ abstract class AbstractGenerator implements GeneratorInterface
         }
         
         return $data;
-    }
-    
-    /**
-     * Check if cache is enabled for structured data
-     *
-     * @return bool
-     */
-    protected function isCacheEnabled(): bool
-    {
-        return $this->configHelper->isStructuredDataCacheEnabled();
-    }
-    
-    /**
-     * Get cache lifetime in seconds
-     *
-     * @return int
-     */
-    protected function getCacheLifetime(): int
-    {
-        return (int)$this->configHelper->getStructuredDataCacheLifetime();
     }
     
     /**
@@ -297,21 +229,18 @@ abstract class AbstractGenerator implements GeneratorInterface
             return '';
         }
         
-        // Remove HTML tags
-        $text = strip_tags($text);
+        // Decode entities, then remove real markup only (keeps bare "<" such as "<3")
+        $text = $this->textCleaner->clean($text);
         
-        // Decode HTML entities
-        $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-        
-        // Normalize whitespace
-        $text = preg_replace('/\s+/', ' ', $text);
-        
+        // Normalize whitespace incl. Unicode spaces (decoded &nbsp;); invalid UTF-8 falls back to ASCII \s
+        $text = preg_replace('/[\s\p{Z}]+/u', ' ', $text) ?? preg_replace('/\s+/', ' ', $text);
+
         // Trim whitespace
         $text = trim($text);
         
         // Limit length if specified
-        if ($maxLength > 0 && strlen($text) > $maxLength) {
-            $text = substr($text, 0, $maxLength - 3) . '...';
+        if ($maxLength > 0 && mb_strlen($text, 'UTF-8') > $maxLength) {
+            $text = mb_substr($text, 0, $maxLength - 3, 'UTF-8') . '...';
         }
         
         return $text;

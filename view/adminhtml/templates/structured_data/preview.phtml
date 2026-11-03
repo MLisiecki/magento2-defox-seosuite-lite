@@ -5,6 +5,7 @@
  * @copyright   Copyright (c) 2025 deFox
  * @license     GNU General Public License v3.0
  */
+/** @var \Magento\Framework\View\Helper\SecureHtmlRenderer $secureRenderer */
 ?>
 <div class="structured-data-preview">
     <div class="admin__page-section">
@@ -96,8 +97,8 @@
     </div>
 </div>
 
-<script type="text/javascript">
-require(['jquery', 'Magento_Ui/js/modal/alert'], function($, alert) {
+<?php ob_start(); try { ?>
+require(['jquery', 'underscore', 'Magento_Ui/js/modal/alert'], function($, _, alert) {
     $(document).ready(function() {
         $('#preview_button').on('click', function() {
             var entityType = $('#entity_type').val();
@@ -142,23 +143,29 @@ require(['jquery', 'Magento_Ui/js/modal/alert'], function($, alert) {
                         
                         if (response.errors && response.errors.length > 0) {
                             $('#error_message').show();
-                            $('#error_content').html('<strong><?= $block->escapeHtml(__('Errors:')) ?></strong><ul>' + 
-                                response.errors.map(function(error) {
-                                    return '<li>' + error + '</li>';
-                                }).join('') + '</ul>');
+                            var errorList = $('<ul>');
+                            response.errors.forEach(function(error) {
+                                errorList.append($('<li>').text(error));
+                            });
+                            $('#error_content').empty()
+                                .append($('<strong>').text('<?= $block->escapeJs(__('Errors:')) ?>'))
+                                .append(errorList);
                         }
-                        
+
                         if (response.warnings && response.warnings.length > 0) {
                             $('#warning_message').show();
-                            $('#warning_content').html('<strong><?= $block->escapeHtml(__('Warnings:')) ?></strong><ul>' + 
-                                response.warnings.map(function(warning) {
-                                    return '<li>' + warning + '</li>';
-                                }).join('') + '</ul>');
+                            var warningList = $('<ul>');
+                            response.warnings.forEach(function(warning) {
+                                warningList.append($('<li>').text(warning));
+                            });
+                            $('#warning_content').empty()
+                                .append($('<strong>').text('<?= $block->escapeJs(__('Warnings:')) ?>'))
+                                .append(warningList);
                         }
                     } else {
                         alert({
                             title: '<?= $block->escapeJs(__('Error')) ?>',
-                            content: response.message
+                            content: _.escape(response.message)
                         });
                     }
                 },
@@ -166,7 +173,7 @@ require(['jquery', 'Magento_Ui/js/modal/alert'], function($, alert) {
                     alert({
                         title: '<?= $block->escapeJs(__('Error')) ?>',
                         content: '<?= $block->escapeJs(__('An error occurred while generating preview')) ?>' + 
-                                (xhr.responseText ? '\n\nDetails: ' + xhr.responseText : '')
+                                (xhr.responseText ? '\n\nDetails: ' + _.escape(xhr.responseText) : '')
                     });
                 },
                 complete: function() {
@@ -198,7 +205,8 @@ require(['jquery', 'Magento_Ui/js/modal/alert'], function($, alert) {
         });
     });
 });
-</script>
+<?php } finally { $scriptString = ob_get_clean(); } ?>
+<?= /* @noEscape */ $secureRenderer->renderTag('script', [], $scriptString, false) ?>
 
 <style>
 .structured-data-preview {

@@ -11,13 +11,13 @@ declare(strict_types=1);
 namespace Defox\SEOSuite\Observer;
 
 use Defox\SEOSuite\Helper\Config;
-use Defox\SEOSuite\Model\Canonical\Exclusion;
+use Defox\SEOSuite\Model\Canonical\RobotsHandler;
 use Defox\SEOSuite\Model\Canonical\Product as CanonicalProduct;
+use Magento\Catalog\Helper\Data as CatalogHelper;
 use Magento\Catalog\Model\Product;
 use Magento\Framework\App\Request\Http;
 use Magento\Framework\Event\Observer;
 use Magento\Framework\Event\ObserverInterface;
-use Magento\Framework\Registry;
 use Magento\Framework\View\Page\Config as PageConfig;
 use Psr\Log\LoggerInterface;
 
@@ -37,9 +37,9 @@ class AddCanonicalToProductPage implements ObserverInterface
     private Http $request;
 
     /**
-     * @var Registry
+     * @var CatalogHelper
      */
-    private Registry $registry;
+    private CatalogHelper $catalogHelper;
     
     /**
      * @var Config
@@ -52,9 +52,9 @@ class AddCanonicalToProductPage implements ObserverInterface
     private CanonicalProduct $canonicalProduct;
     
     /**
-     * @var Exclusion
+     * @var RobotsHandler
      */
-    private Exclusion $exclusion;
+    private RobotsHandler $robotsHandler;
     
     /**
      * @var LoggerInterface
@@ -64,27 +64,27 @@ class AddCanonicalToProductPage implements ObserverInterface
     /**
      * @param PageConfig $pageConfig
      * @param Http $request
-     * @param Registry $registry
+     * @param CatalogHelper $catalogHelper
      * @param Config $config
      * @param CanonicalProduct $canonicalProduct
-     * @param Exclusion $exclusion
+     * @param RobotsHandler $robotsHandler
      * @param LoggerInterface $logger
      */
     public function __construct(
         PageConfig $pageConfig,
         Http $request,
-        Registry $registry,
+        CatalogHelper $catalogHelper,
         Config $config,
         CanonicalProduct $canonicalProduct,
-        Exclusion $exclusion,
+        RobotsHandler $robotsHandler,
         LoggerInterface $logger
     ) {
         $this->pageConfig = $pageConfig;
         $this->request = $request;
-        $this->registry = $registry;
+        $this->catalogHelper = $catalogHelper;
         $this->config = $config;
         $this->canonicalProduct = $canonicalProduct;
-        $this->exclusion = $exclusion;
+        $this->robotsHandler = $robotsHandler;
         $this->logger = $logger;
     }
 
@@ -102,18 +102,19 @@ class AddCanonicalToProductPage implements ObserverInterface
                 return;
             }
             
-            // Check if canonical links are enabled
-            if (!$this->config->isProductCanonicalEnabled()) {
+            // Check if the module and canonical links are enabled
+            if (!$this->config->isEnabled() || !$this->config->isProductCanonicalEnabled()) {
                 return;
             }
             
             // Check if product should have NOINDEX
-            if ($this->exclusion->hasNoindexTag()) {
+            // Same decision the robots meta uses (no canonical on NOINDEX pages)
+            if ($this->robotsHandler->shouldAddNoindex()) {
                 return;
             }
             
-            // Get current product from registry
-            $product = $this->registry->registry('current_product');
+            // Current product resolved by the core view controller
+            $product = $this->catalogHelper->getProduct();
             
             if (!$product instanceof Product) {
                 return;
@@ -130,7 +131,7 @@ class AddCanonicalToProductPage implements ObserverInterface
                     ['attributes' => ['rel' => 'canonical']]
                 );
             }
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             $this->logger->error(
                 'Error adding canonical link to product page: ' . $e->getMessage(),
                 ['exception' => $e]

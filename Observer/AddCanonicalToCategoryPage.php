@@ -12,12 +12,12 @@ namespace Defox\SEOSuite\Observer;
 
 use Defox\SEOSuite\Helper\Config;
 use Defox\SEOSuite\Model\Canonical\Category as CanonicalCategory;
-use Defox\SEOSuite\Model\Canonical\Exclusion;
+use Defox\SEOSuite\Model\Canonical\RobotsHandler;
+use Magento\Catalog\Helper\Data as CatalogHelper;
 use Magento\Catalog\Model\Category;
 use Magento\Framework\App\Request\Http;
 use Magento\Framework\Event\Observer;
 use Magento\Framework\Event\ObserverInterface;
-use Magento\Framework\Registry;
 use Magento\Framework\View\Page\Config as PageConfig;
 use Psr\Log\LoggerInterface;
 
@@ -37,9 +37,9 @@ class AddCanonicalToCategoryPage implements ObserverInterface
     private Http $request;
 
     /**
-     * @var Registry
+     * @var CatalogHelper
      */
-    private Registry $registry;
+    private CatalogHelper $catalogHelper;
     
     /**
      * @var Config
@@ -52,9 +52,9 @@ class AddCanonicalToCategoryPage implements ObserverInterface
     private CanonicalCategory $canonicalCategory;
     
     /**
-     * @var Exclusion
+     * @var RobotsHandler
      */
-    private Exclusion $exclusion;
+    private RobotsHandler $robotsHandler;
     
     /**
      * @var LoggerInterface
@@ -64,27 +64,27 @@ class AddCanonicalToCategoryPage implements ObserverInterface
     /**
      * @param PageConfig $pageConfig
      * @param Http $request
-     * @param Registry $registry
+     * @param CatalogHelper $catalogHelper
      * @param Config $config
      * @param CanonicalCategory $canonicalCategory
-     * @param Exclusion $exclusion
+     * @param RobotsHandler $robotsHandler
      * @param LoggerInterface $logger
      */
     public function __construct(
         PageConfig $pageConfig,
         Http $request,
-        Registry $registry,
+        CatalogHelper $catalogHelper,
         Config $config,
         CanonicalCategory $canonicalCategory,
-        Exclusion $exclusion,
+        RobotsHandler $robotsHandler,
         LoggerInterface $logger
     ) {
         $this->pageConfig = $pageConfig;
         $this->request = $request;
-        $this->registry = $registry;
+        $this->catalogHelper = $catalogHelper;
         $this->config = $config;
         $this->canonicalCategory = $canonicalCategory;
-        $this->exclusion = $exclusion;
+        $this->robotsHandler = $robotsHandler;
         $this->logger = $logger;
     }
 
@@ -102,18 +102,19 @@ class AddCanonicalToCategoryPage implements ObserverInterface
                 return;
             }
             
-            // Check if canonical links are enabled
-            if (!$this->config->isCategoryCanonicalEnabled()) {
+            // Check if the module and canonical links are enabled
+            if (!$this->config->isEnabled() || !$this->config->isCategoryCanonicalEnabled()) {
                 return;
             }
             
             // Check if category should have NOINDEX
-            if ($this->exclusion->hasNoindexTag()) {
+            // Same decision the robots meta uses (no canonical on NOINDEX pages)
+            if ($this->robotsHandler->shouldAddNoindex()) {
                 return;
             }
             
-            // Get current category from registry
-            $category = $this->registry->registry('current_category');
+            // Current category resolved by the core view controller
+            $category = $this->catalogHelper->getCategory();
             
             if (!$category instanceof Category) {
                 return;
@@ -130,7 +131,7 @@ class AddCanonicalToCategoryPage implements ObserverInterface
                     ['attributes' => ['rel' => 'canonical']]
                 );
             }
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             $this->logger->error(
                 'Error adding canonical link to category page: ' . $e->getMessage(),
                 ['exception' => $e]

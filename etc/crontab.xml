@@ -12,5 +12,8 @@
         <job name="defox_seosuite_generate_sitemap" instance="Defox\SEOSuite\Cron\GenerateSitemap" method="execute">
             <config_path>defox_seosuite/sitemap/generation_cron_expr</config_path>
         </job>
+        <job name="defox_seosuite_clean_sitemap_stats" instance="Defox\SEOSuite\Cron\CleanSitemapStatistics" method="execute">
+            <schedule>30 3 * * *</schedule>
+        </job>
     </group>
 </config>

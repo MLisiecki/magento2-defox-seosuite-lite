@@ -7,15 +7,8 @@
 
 var config = {
     paths: {
-        'Defox_SEOSuite/js/form/element/variables-display': 'Defox_SEOSuite/js/form/element/variables-display',
         'Defox_SEOSuite/js/form/element/template-type': 'Defox_SEOSuite/js/form/element/template-type',
         'Defox_SEOSuite/js/sitemap-validator': 'Defox_SEOSuite/js/sitemap-validator',
-        'Defox_SEOSuite/js/sitemap-dashboard': 'Defox_SEOSuite/js/sitemap-dashboard',
-        'chartjs': 'chartjs/Chart.min'
-    },
-    shim: {
-        'chartjs': {
-            exports: 'Chart'
-        }
+        'Defox_SEOSuite/js/sitemap-dashboard': 'Defox_SEOSuite/js/sitemap-dashboard'
     }
 };

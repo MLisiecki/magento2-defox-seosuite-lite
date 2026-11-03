@@ -10,9 +10,8 @@ declare(strict_types=1);
 
 namespace Defox\SEOSuite\Template;
 
-use Defox\SEOSuite\Helper\Data as SeoHelper;
+use Defox\SEOSuite\Model\Text\Cleaner;
 use Magento\Framework\Escaper;
-use Magento\Framework\App\CacheInterface;
 use Magento\Store\Model\StoreManagerInterface;
 
 /**
@@ -26,21 +25,13 @@ abstract class AbstractVariableProcessor implements VariableProcessorInterface
      * Cache key prefix
      */
     protected const CACHE_PREFIX = 'defox_seosuite_variable_';
-    
-    /**
-     * Cache lifetime (1 hour)
-     */
-    protected const CACHE_LIFETIME = 3600;
 
     /**
+     * Per-request memo only: meta output is not cached across requests (FPC tags cover the pages)
+     *
      * @var array
      */
     protected array $processedCache = [];
-
-    /**
-     * @var SeoHelper
-     */
-    protected SeoHelper $seoHelper;
 
     /**
      * @var StoreManagerInterface
@@ -53,26 +44,23 @@ abstract class AbstractVariableProcessor implements VariableProcessorInterface
     protected Escaper $escaper;
 
     /**
-     * @var CacheInterface
+     * @var Cleaner
      */
-    protected CacheInterface $cache;
+    protected Cleaner $textCleaner;
 
     /**
-     * @param SeoHelper $seoHelper
      * @param StoreManagerInterface $storeManager
      * @param Escaper $escaper
-     * @param CacheInterface $cache
+     * @param Cleaner $textCleaner
      */
     public function __construct(
-        SeoHelper $seoHelper,
         StoreManagerInterface $storeManager,
         Escaper $escaper,
-        CacheInterface $cache
+        Cleaner $textCleaner
     ) {
-        $this->seoHelper = $seoHelper;
         $this->storeManager = $storeManager;
         $this->escaper = $escaper;
-        $this->cache = $cache;
+        $this->textCleaner = $textCleaner;
     }
 
     /**
@@ -86,66 +74,23 @@ abstract class AbstractVariableProcessor implements VariableProcessorInterface
 
         $cacheKey = $this->getCacheKey($template, $entity, $additionalVars);
         
-        // Check in-memory cache first
         if (isset($this->processedCache[$cacheKey])) {
             return $this->processedCache[$cacheKey];
         }
-        
-        // Check persistent cache
-        $cachedResult = $this->cache->load($cacheKey);
-        if ($cachedResult !== false) {
-            $this->processedCache[$cacheKey] = $cachedResult;
-            return $cachedResult;
-        }
 
-        // Ensure entity is properly loaded without force reloading
-        $entity = $this->ensureEntityLoaded($entity);
-
-        // Process variables, such as {{product.name}}, {{category.name}}, etc.
+        // One pass over every {{...}} token: {{fn(args)}} is a directive, anything else a variable path
         $result = preg_replace_callback(
             '/\{\{([^}]+)\}\}/',
             function ($matches) use ($entity, $additionalVars) {
+                if (preg_match('/^\s*([a-zA-Z_][a-zA-Z0-9_]*)\((.*)\)\s*$/s', $matches[1], $call)) {
+                    return $this->processDirective($call[1], $call[2], $entity, $additionalVars);
+                }
                 return $this->processVariable($matches[1], $entity, $additionalVars);
             },
             $template
         );
 
-        // Process directives, such as {{lower(product.name)}}, {{truncate(product.description, 160)}}, etc.
-        $result = preg_replace_callback(
-            '/\{\{([a-zA-Z0-9_]+)\(([^)]+)\)\}\}/',
-            function ($matches) use ($entity, $additionalVars) {
-                return $this->processDirective($matches[1], $matches[2], $entity, $additionalVars);
-            },
-            $result
-        );
-
-        // Cache the result
-        $this->processedCache[$cacheKey] = $result;
-        $this->cache->save($result, $cacheKey, ['DEFOX_SEO_VARIABLES'], self::CACHE_LIFETIME);
-        
-        return $result;
-    }
-
-    /**
-     * Ensure entity is properly loaded
-     *
-     * @param mixed $entity
-     * @return mixed
-     */
-    protected function ensureEntityLoaded($entity)
-    {
-        // Only load if entity has an ID but no data loaded
-        if (method_exists($entity, 'getId') && 
-            method_exists($entity, 'isObjectNew') && 
-            method_exists($entity, 'load') &&
-            $entity->getId() && 
-            !$entity->isObjectNew() && 
-            !$entity->hasData()
-        ) {
-            $entity->load($entity->getId());
-        }
-        
-        return $entity;
+        return $this->processedCache[$cacheKey] = $result;
     }
 
     /**
@@ -274,7 +219,8 @@ abstract class AbstractVariableProcessor implements VariableProcessorInterface
             }
         }
         
-        return (string)$value;
+        // Arrays/objects become '' (trade-off 1), same as getEntityAttributeValue()
+        return is_scalar($value) || $value instanceof \Stringable ? (string)$value : '';
     }
 
     /**
@@ -293,29 +239,34 @@ abstract class AbstractVariableProcessor implements VariableProcessorInterface
         switch (strtolower($directive)) {
             case 'lower':
                 $value = $this->processVariable($params[0], $entity, $additionalVars);
-                return strtolower($value);
+                return mb_strtolower($value, 'UTF-8');
                 
             case 'upper':
                 $value = $this->processVariable($params[0], $entity, $additionalVars);
-                return strtoupper($value);
+                return mb_strtoupper($value, 'UTF-8');
                 
             case 'ucfirst':
                 $value = $this->processVariable($params[0], $entity, $additionalVars);
-                return ucfirst($value);
+                return mb_strtoupper(mb_substr($value, 0, 1, 'UTF-8'), 'UTF-8') . mb_substr($value, 1, null, 'UTF-8');
                 
             case 'ucwords':
                 $value = $this->processVariable($params[0], $entity, $additionalVars);
-                return ucwords($value);
+                // Like ucwords(): upper-case the first letter after whitespace, leave the rest untouched
+                return preg_replace_callback(
+                    '/(?<!\S)\p{Ll}/u',
+                    static fn (array $m): string => mb_strtoupper($m[0], 'UTF-8'),
+                    $value
+                ) ?? $value;
                 
             case 'truncate':
                 $value = $this->processVariable($params[0], $entity, $additionalVars);
                 $length = isset($params[1]) ? (int)$params[1] : 255;
                 $suffix = isset($params[2]) ? trim($params[2], '"\'') : '...';
-                return mb_strlen($value) > $length ? mb_substr($value, 0, $length) . $suffix : $value;
+                return mb_strlen($value, 'UTF-8') > $length ? mb_substr($value, 0, $length, 'UTF-8') . $suffix : $value;
                 
             case 'strip_tags':
                 $value = $this->processVariable($params[0], $entity, $additionalVars);
-                return strip_tags($value);
+                return $this->textCleaner->clean($value);
                 
             case 'escape':
                 $value = $this->processVariable($params[0], $entity, $additionalVars);
@@ -334,6 +285,23 @@ abstract class AbstractVariableProcessor implements VariableProcessorInterface
             default:
                 return '';
         }
+    }
+
+    /**
+     * Fallback for attribute codes not handled explicitly by a processor.
+     *
+     * Reads stored data only (never dispatches a method named by the template) and
+     * returns scalars/Stringable only; arrays and objects become ''.
+     *
+     * @param mixed $entity
+     * @param string $attributeCode
+     * @return string
+     */
+    protected function getEntityAttributeValue($entity, string $attributeCode): string
+    {
+        $value = method_exists($entity, 'getData') ? $entity->getData($attributeCode) : null;
+
+        return is_scalar($value) || $value instanceof \Stringable ? (string)$value : '';
     }
 
     /**

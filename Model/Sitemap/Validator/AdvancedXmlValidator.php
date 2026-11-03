@@ -11,9 +11,6 @@ namespace Defox\SEOSuite\Model\Sitemap\Validator;
 
 use Defox\SEOSuite\Helper\Config;
 use Defox\SEOSuite\Logger\Logger;
-use Magento\Framework\HTTP\Client\Curl;
-use Magento\Framework\Filesystem;
-use Magento\Framework\App\Filesystem\DirectoryList;
 
 /**
  * Advanced XML sitemap validator
@@ -43,11 +40,6 @@ class AdvancedXmlValidator
     private const MAX_URL_LENGTH = 2048;
     
     /**
-     * Timeout for URL health checks
-     */
-    private const URL_CHECK_TIMEOUT = 5;
-
-    /**
      * @var Config
      */
     private Config $config;
@@ -58,33 +50,17 @@ class AdvancedXmlValidator
     private Logger $logger;
 
     /**
-     * @var Curl
-     */
-    private Curl $curl;
-
-    /**
-     * @var Filesystem
-     */
-    private Filesystem $filesystem;
-
-    /**
      * Constructor
      *
      * @param Config $config
      * @param Logger $logger
-     * @param Curl $curl
-     * @param Filesystem $filesystem
      */
     public function __construct(
         Config $config,
-        Logger $logger,
-        Curl $curl,
-        Filesystem $filesystem
+        Logger $logger
     ) {
         $this->config = $config;
         $this->logger = $logger;
-        $this->curl = $curl;
-        $this->filesystem = $filesystem;
     }
 
     /**
@@ -118,22 +94,14 @@ class AdvancedXmlValidator
             $this->validateGoogleRequirements($xml, $result);
             $this->validateSeoOptimization($xml, $result);
             $this->analyzePerformance($xml, $filePath, $result);
-            
-            // URL health monitoring (if enabled and not too many URLs)
-            if ($options['check_url_health'] ?? false) {
-                $this->performUrlHealthCheck($xml, $result, $options);
-            }
 
             // Set performance metrics
             $result->setPerformanceMetric('validation_time', microtime(true) - $startTime);
             
         } catch (\Exception $e) {
-            $result->addError('Validation failed: ' . $e->getMessage(), [
-                'exception' => get_class($e),
-                'file' => $e->getFile(),
-                'line' => $e->getLine()
-            ]);
-            $this->logger->error('XML validation error: ' . $e->getMessage());
+            // Exception text may contain server paths: details go to the log only
+            $result->addError('Validation failed due to an internal error. Please check the log for details.');
+            $this->logger->error('XML validation error: ' . $e->getMessage(), ['exception' => $e]);
         }
 
         return $result;
@@ -182,15 +150,24 @@ class AdvancedXmlValidator
      */
     private function loadXmlDocument(string $filePath, ValidationResult $result): ?\DOMDocument
     {
+        // Collect libxml errors instead of PHP warnings (whose text includes the file path)
+        $useInternalErrors = libxml_use_internal_errors(true);
         try {
             $xml = new \DOMDocument();
-            $xml->load($filePath);
-            
+            if (!$xml->load($filePath, LIBXML_NONET)) {
+                $error = libxml_get_last_error();
+                $result->addError(
+                    'Failed to load XML document: '
+                    . ($error ? trim($error->message) . ' (line ' . $error->line . ')' : 'unknown error')
+                );
+                return null;
+            }
+
             $result->addInfo('XML document loaded successfully');
             return $xml;
-        } catch (\Exception $e) {
-            $result->addError('Failed to load XML document: ' . $e->getMessage());
-            return null;
+        } finally {
+            libxml_clear_errors();
+            libxml_use_internal_errors($useInternalErrors);
         }
     }
 
@@ -425,13 +402,6 @@ class AdvancedXmlValidator
         $urlCount = $urls->length;
         $fileSize = filesize($filePath);
 
-        // Calculate compression ratio if it's a gzipped file
-        if (pathinfo($filePath, PATHINFO_EXTENSION) === 'gz') {
-            $uncompressedSize = strlen(gzfile_get_contents($filePath));
-            $compressionRatio = ($fileSize / $uncompressedSize) * 100;
-            $result->setPerformanceMetric('compression_ratio', round($compressionRatio, 2));
-        }
-
         // Calculate URLs per MB
         $urlsPerMb = $fileSize > 0 ? ($urlCount / ($fileSize / 1024 / 1024)) : 0;
         $result->setPerformanceMetric('urls_per_mb', round($urlsPerMb, 0));
@@ -447,145 +417,6 @@ class AdvancedXmlValidator
 
         if ($fileSize > 10 * 1024 * 1024) { // 10MB
             $result->addWarning('Large file size may impact download time for crawlers');
-        }
-    }
-
-    /**
-     * Perform URL health check on sample URLs
-     *
-     * @param \DOMDocument $xml
-     * @param ValidationResult $result
-     * @param array $options
-     * @return void
-     */
-    private function performUrlHealthCheck(\DOMDocument $xml, ValidationResult $result, array $options): void
-    {
-        $urls = $xml->getElementsByTagName('url');
-        $totalUrls = $urls->length;
-        
-        // Sample size for health check
-        $sampleSize = min($options['health_check_sample_size'] ?? 50, $totalUrls);
-        $sampleUrls = $this->getSampleUrls($xml, $sampleSize);
-
-        $healthResults = [
-            'checked' => 0,
-            'accessible' => 0,
-            'errors' => 0,
-            'warnings' => 0,
-            'response_times' => []
-        ];
-
-        foreach ($sampleUrls as $url) {
-            $healthResults['checked']++;
-            $checkResult = $this->checkUrlHealth($url);
-            
-            if ($checkResult['accessible']) {
-                $healthResults['accessible']++;
-            } else {
-                $healthResults['errors']++;
-                $result->addError('URL not accessible', [
-                    'url' => $url,
-                    'status_code' => $checkResult['status_code'],
-                    'error' => $checkResult['error']
-                ]);
-            }
-
-            if (isset($checkResult['response_time'])) {
-                $healthResults['response_times'][] = $checkResult['response_time'];
-                
-                // Flag slow responses
-                if ($checkResult['response_time'] > 3000) { // 3 seconds
-                    $result->addWarning('Slow response time', [
-                        'url' => $url,
-                        'response_time_ms' => $checkResult['response_time']
-                    ]);
-                }
-            }
-        }
-
-        // Calculate metrics
-        $accessibilityRate = ($healthResults['accessible'] / $healthResults['checked']) * 100;
-        $avgResponseTime = !empty($healthResults['response_times']) 
-            ? array_sum($healthResults['response_times']) / count($healthResults['response_times'])
-            : 0;
-
-        $result->setSeoMetric('url_accessibility_rate', round($accessibilityRate, 2));
-        $result->setSeoMetric('avg_response_time_ms', round($avgResponseTime, 0));
-        $result->setSeoMetric('broken_urls_percent', round(100 - $accessibilityRate, 2));
-
-        $result->addInfo(sprintf(
-            'URL Health Check: %d/%d URLs accessible (%.1f%%)',
-            $healthResults['accessible'],
-            $healthResults['checked'],
-            $accessibilityRate
-        ));
-    }
-
-    /**
-     * Get sample URLs for health checking
-     *
-     * @param \DOMDocument $xml
-     * @param int $sampleSize
-     * @return array
-     */
-    private function getSampleUrls(\DOMDocument $xml, int $sampleSize): array
-    {
-        $urls = $xml->getElementsByTagName('url');
-        $allUrls = [];
-
-        foreach ($urls as $urlElement) {
-            $locElements = $urlElement->getElementsByTagName('loc');
-            if ($locElements->length > 0) {
-                $allUrls[] = trim($locElements->item(0)->textContent);
-            }
-        }
-
-        // Get random sample
-        if (count($allUrls) <= $sampleSize) {
-            return $allUrls;
-        }
-
-        $sampleKeys = array_rand($allUrls, $sampleSize);
-        if (!is_array($sampleKeys)) {
-            $sampleKeys = [$sampleKeys];
-        }
-
-        return array_intersect_key($allUrls, array_flip($sampleKeys));
-    }
-
-    /**
-     * Check health of a single URL
-     *
-     * @param string $url
-     * @return array
-     */
-    private function checkUrlHealth(string $url): array
-    {
-        try {
-            $startTime = microtime(true);
-            
-            $this->curl->setTimeout(self::URL_CHECK_TIMEOUT);
-            $this->curl->setOption(CURLOPT_NOBODY, true); // HEAD request only
-            $this->curl->setOption(CURLOPT_FOLLOWLOCATION, true);
-            $this->curl->setOption(CURLOPT_MAXREDIRS, 3);
-            
-            $this->curl->get($url);
-            $statusCode = $this->curl->getStatus();
-            $responseTime = (microtime(true) - $startTime) * 1000; // Convert to milliseconds
-
-            return [
-                'accessible' => $statusCode >= 200 && $statusCode < 400,
-                'status_code' => $statusCode,
-                'response_time' => round($responseTime, 0),
-                'error' => null
-            ];
-        } catch (\Exception $e) {
-            return [
-                'accessible' => false,
-                'status_code' => 0,
-                'response_time' => null,
-                'error' => $e->getMessage()
-            ];
         }
     }
 

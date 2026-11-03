@@ -20,15 +20,6 @@ use Magento\Cms\Model\Page;
 class Article extends WebPage
 {
     /**
-     * Keywords that identify article/blog pages
-     * @var array
-     */
-    private array $articleKeywords = [
-        'blog', 'article', 'news', 'post', 'story',
-        'aktualnosci', 'artykul', 'wpis', 'nowosci'
-    ];
-
-    /**
      * Generate structured data for article
      *
      * @param mixed $entity
@@ -56,16 +47,22 @@ class Article extends WebPage
         }
 
         // Add article body with HTML cleaning
-        $data['articleBody'] = $this->cleanContent($page->getContent());
+        $data['articleBody'] = $this->cleanContent((string)$page->getContent());
 
         // Add word count using cleaned content
-        $cleanContent = $this->cleanContent($page->getContent());
-        $data['wordCount'] = str_word_count($cleanContent);
+        $cleanContent = $this->cleanContent((string)$page->getContent());
+        // UTF-8 aware (str_word_count is ASCII-only); "don't" / "well-known" stay one word, invalid UTF-8 -> 0
+        $data['wordCount'] = (int)preg_match_all('/[\p{L}\p{M}\p{N}]+(?:[\'’-][\p{L}\p{M}\p{N}]+)*/u', $cleanContent);
 
-        // Add images from content
-        $images = $this->extractImagesFromContent($page->getContent());
+        // Add images from content, with fallback to organization logo
+        $images = $this->extractImagesFromContent((string)$page->getContent());
         if (!empty($images)) {
             $data['image'] = count($images) === 1 ? $images[0] : $images;
+        } else {
+            $logoUrl = $this->organizationData->getLogoUrl();
+            if ($logoUrl !== null) {
+                $data['image'] = $logoUrl;
+            }
         }
 
         // Add keywords from meta keywords (cleaned)
@@ -89,12 +86,7 @@ class Article extends WebPage
      */
     public function canHandle($entity): bool
     {
-        if (!parent::canHandle($entity)) {
-            return false;
-        }
-
-        // Check if page is an article/blog post
-        return $this->isArticlePage($entity);
+        return $entity instanceof Page && $this->isArticleLikePage($entity);
     }
 
     /**
@@ -108,32 +100,6 @@ class Article extends WebPage
     }
 
     /**
-     * Check if page is an article/blog post
-     *
-     * @param Page $page
-     * @return bool
-     */
-    private function isArticlePage(Page $page): bool
-    {
-        $identifier = strtolower($page->getIdentifier());
-        $title = strtolower($page->getTitle());
-
-        foreach ($this->articleKeywords as $keyword) {
-            if (strpos($identifier, $keyword) !== false || strpos($title, $keyword) !== false) {
-                return true;
-            }
-        }
-
-        // Check if page has a specific layout that indicates it's an article
-        $layout = $page->getPageLayout();
-        if ($layout && strpos($layout, 'article') !== false) {
-            return true;
-        }
-
-        return false;
-    }
-
-    /**
      * Get article type (Article or BlogPosting)
      *
      * @param Page $page
@@ -141,13 +107,7 @@ class Article extends WebPage
      */
     private function getArticleType(Page $page): string
     {
-        $identifier = strtolower($page->getIdentifier());
-
-        if (strpos($identifier, 'blog') !== false) {
-            return 'BlogPosting';
-        }
-
-        return 'Article';
+        return preg_match('/(?<![\p{L}\p{N}])blog/iu', (string)$page->getIdentifier()) ? 'BlogPosting' : 'Article';
     }
 
     /**
@@ -163,34 +123,26 @@ class Article extends WebPage
         if (isset($context['author'])) {
             if (is_array($context['author'])) {
                 return $context['author'];
-            } else {
-                return [
-                    '@type' => 'Person',
-                    'name' => $context['author']
-                ];
+            }
+            $name = $this->cleanTextField($context['author']);
+            if ($name !== '') {
+                return ['@type' => 'Person', 'name' => $name];
             }
         }
 
         // Try to extract author from content
-        $content = $page->getContent();
-        if (preg_match('/(?:by|autor:|author:)\s*([^<\
-]+)/i', $content, $matches)) {
-            return [
-                '@type' => 'Person',
-                'name' => trim($matches[1])
-            ];
+        $content = (string)$page->getContent();
+        // "by" only as a whole word ("Ruby", "nearby" are not bylines); UTF-8 aware, invalid UTF-8 -> no match
+        // ponytail: blank byline ("by <b>Jan</b>", "Autor: \r\n") falls back to the Organization, not the tag text
+        if (preg_match('/(?<![\p{L}\p{N}])(?:by\s|autor:|author:)\s*([^<\n]+)/iu', $content, $matches)) {
+            $name = $this->cleanTextField($matches[1]);
+            if ($name !== '') {
+                return ['@type' => 'Person', 'name' => $name];
+            }
         }
 
-        // Default to organization
-        $organizationName = $this->configHelper->getStructuredDataOrganizationName();
-        if ($organizationName) {
-            return [
-                '@type' => 'Organization',
-                'name' => $organizationName
-            ];
-        }
-
-        return null;
+        // Default to organization (one guard: enabled + non-empty name)
+        return $this->organizationData->getNamedData();
     }
 
     /**
@@ -202,21 +154,39 @@ class Article extends WebPage
     private function extractImagesFromContent(string $content): array
     {
         $images = [];
+        $baseUrl = $this->storeManager->getStore()->getBaseUrl();
+        $mediaUrl = $this->storeManager->getStore()->getBaseUrl(\Magento\Framework\UrlInterface::URL_TYPE_MEDIA);
+
+        // Handle Magento media directives {{media url="..."}}
+        if (preg_match_all('/\{\{media\s+url=["\']([^"\']+)["\']\s*\}\}/i', $content, $mediaMatches)) {
+            foreach ($mediaMatches[1] as $mediaPath) {
+                $images[] = $mediaUrl . ltrim($mediaPath, '/');
+            }
+        }
 
         // Extract img tags
         if (preg_match_all('/<img[^>]+src=[\"\']([^\"\']+)[\"\'][^>]*>/i', $content, $matches)) {
             foreach ($matches[1] as $imageUrl) {
-                // Convert relative URLs to absolute
-                if (strpos($imageUrl, 'http') !== 0) {
-                    $baseUrl = $this->storeManager->getStore()->getBaseUrl();
+                if (strpos($imageUrl, '{{media') !== false) {
+                    continue; // Already handled above
+                }
+                if (str_starts_with($imageUrl, '//')) {
+                    $imageUrl = (parse_url($baseUrl, PHP_URL_SCHEME) ?: 'https') . ':' . $imageUrl;
+                } elseif (preg_match('#^[a-z][a-z0-9+.-]*:#i', $imageUrl)) {
+                    if (!preg_match('#^https?://#i', $imageUrl)) {
+                        continue; // data:, blob:, javascript: ... are not image URLs for schema.org
+                    }
+                } else {
                     $imageUrl = rtrim($baseUrl, '/') . '/' . ltrim($imageUrl, '/');
                 }
-
+                // FILTER_VALIDATE_URL is ASCII-only: percent-encode UTF-8 / spaces (as browsers do) so "żółw.jpg" survives
+                $imageUrl = (string)preg_replace_callback('/[^\x21-\x7E]+/', fn ($m) => rawurlencode($m[0]), $imageUrl);
                 if (filter_var($imageUrl, FILTER_VALIDATE_URL)) {
                     $images[] = $imageUrl;
                 }
             }
         }
-        return array_unique($images);
+
+        return array_values(array_unique($images));
     }
 }

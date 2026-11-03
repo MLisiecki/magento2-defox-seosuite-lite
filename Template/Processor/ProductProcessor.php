@@ -10,14 +10,13 @@ declare(strict_types=1);
 
 namespace Defox\SEOSuite\Template\Processor;
 
-use Defox\SEOSuite\Helper\Data as SeoHelper;
+use Defox\SEOSuite\Model\Text\Cleaner;
 use Defox\SEOSuite\Template\AbstractVariableProcessor;
 use Magento\Catalog\Api\Data\ProductInterface;
-use Magento\Catalog\Api\CategoryRepositoryInterface;
+use Magento\Catalog\Helper\Data as CatalogHelper;
 use Magento\Catalog\Model\Product;
-use Magento\Framework\App\CacheInterface;
+use Magento\Catalog\Model\ResourceModel\Category\CollectionFactory as CategoryCollectionFactory;
 use Magento\Framework\Escaper;
-use Magento\Framework\Registry;
 use Magento\Store\Model\StoreManagerInterface;
 
 /**
@@ -28,14 +27,14 @@ use Magento\Store\Model\StoreManagerInterface;
 class ProductProcessor extends AbstractVariableProcessor
 {
     /**
-     * @var Registry
+     * @var CatalogHelper
      */
-    protected Registry $registry;
+    protected CatalogHelper $catalogHelper;
 
     /**
-     * @var CategoryRepositoryInterface
+     * @var CategoryCollectionFactory
      */
-    protected CategoryRepositoryInterface $categoryRepository;
+    protected CategoryCollectionFactory $categoryCollectionFactory;
 
     /**
      * @var array
@@ -43,24 +42,29 @@ class ProductProcessor extends AbstractVariableProcessor
     private array $categoryCache = [];
 
     /**
-     * @param SeoHelper $seoHelper
+     * Assigned (non-root) categories per product ID, keyed by category ID
+     *
+     * @var array<int|string, array<int, \Magento\Catalog\Model\Category>>
+     */
+    private array $assignedCategories = [];
+
+    /**
      * @param StoreManagerInterface $storeManager
      * @param Escaper $escaper
-     * @param CacheInterface $cache
-     * @param Registry $registry
-     * @param CategoryRepositoryInterface $categoryRepository
+     * @param Cleaner $textCleaner
+     * @param CatalogHelper $catalogHelper
+     * @param CategoryCollectionFactory $categoryCollectionFactory
      */
     public function __construct(
-        SeoHelper $seoHelper,
         StoreManagerInterface $storeManager,
         Escaper $escaper,
-        CacheInterface $cache,
-        Registry $registry,
-        CategoryRepositoryInterface $categoryRepository
+        Cleaner $textCleaner,
+        CatalogHelper $catalogHelper,
+        CategoryCollectionFactory $categoryCollectionFactory
     ) {
-        parent::__construct($seoHelper, $storeManager, $escaper, $cache);
-        $this->registry = $registry;
-        $this->categoryRepository = $categoryRepository;
+        parent::__construct($storeManager, $escaper, $textCleaner);
+        $this->catalogHelper = $catalogHelper;
+        $this->categoryCollectionFactory = $categoryCollectionFactory;
     }
 
     /**
@@ -262,7 +266,7 @@ class ProductProcessor extends AbstractVariableProcessor
 
             default:
                 // Try custom attributes
-                return $this->getProductCustomAttribute($product, $property);
+                return $this->getEntityAttributeValue($product, $property);
         }
     }
 
@@ -314,12 +318,7 @@ class ProductProcessor extends AbstractVariableProcessor
                 return (string)$category->getLevel();
 
             default:
-                // Try getData for other properties
-                if (method_exists($category, 'getData')) {
-                    $value = $category->getData($property);
-                    return $value !== null ? (string)$value : '';
-                }
-                return '';
+                return $this->getEntityAttributeValue($category, $property);
         }
     }
 
@@ -338,8 +337,8 @@ class ProductProcessor extends AbstractVariableProcessor
             return $this->categoryCache[$productId];
         }
         
-        // Method 1: Try to get current category from registry (most reliable for frontend)
-        $currentCategory = $this->registry->registry('current_category');
+        // Method 1: the category the core product view resolved (most reliable for frontend)
+        $currentCategory = $this->catalogHelper->getCategory();
         if ($currentCategory && $currentCategory->getId()) {
             // Verify this category actually contains this product
             if ($this->isCategoryAssignedToProduct((int)$currentCategory->getId(), $product)) {
@@ -348,42 +347,16 @@ class ProductProcessor extends AbstractVariableProcessor
             }
         }
         
-        // Method 2: Get from product's category IDs (most direct)
-        $categoryIds = [];
-        if (method_exists($product, 'getCategoryIds')) {
-            $categoryIds = $product->getCategoryIds();
-        } elseif (method_exists($product, 'getData')) {
-            $categoryIds = $product->getData('category_ids') ?: [];
-        }
-        
-        if (!empty($categoryIds)) {
-            // Find the deepest non-root category (highest level number)
-            $bestCategory = null;
-            $bestLevel = 0;
-
-            foreach ($categoryIds as $categoryId) {
-                if ($categoryId <= 2) { // Skip root categories
-                    continue;
-                }
-
-                try {
-                    $category = $this->categoryRepository->get($categoryId);
-                    if ($category && $category->getId()) {
-                        $level = (int)$category->getLevel();
-                        if ($level > $bestLevel) {
-                            $bestCategory = $category;
-                            $bestLevel = $level;
-                        }
-                    }
-                } catch (\Exception $e) {
-                    // Continue to next category
-                    continue;
-                }
-            }            
-            if ($bestCategory) {
-                $this->categoryCache[$productId] = $bestCategory;
-                return $bestCategory;
+        // Method 2: the deepest assigned category (highest level)
+        $bestCategory = null;
+        foreach ($this->getAssignedCategories($product) as $category) {
+            if ($bestCategory === null || (int)$category->getLevel() > (int)$bestCategory->getLevel()) {
+                $bestCategory = $category;
             }
+        }
+        if ($bestCategory) {
+            $this->categoryCache[$productId] = $bestCategory;
+            return $bestCategory;
         }
         
         // No category found
@@ -418,31 +391,58 @@ class ProductProcessor extends AbstractVariableProcessor
      */
     protected function getProductCategoryNames(ProductInterface|Product $product): string
     {
+        $categoryNames = [];
+        foreach ($this->getAssignedCategories($product) as $category) {
+            if ($category->getName()) {
+                $categoryNames[] = $category->getName();
+            }
+        }
+        
+        return implode(', ', $categoryNames);
+    }
+
+    /**
+     * Assigned non-root categories of the product, loaded with one collection query per product (CR-29)
+     *
+     * @param ProductInterface|Product $product
+     * @return array<int, \Magento\Catalog\Model\Category> in the product's category_ids order
+     */
+    private function getAssignedCategories(ProductInterface|Product $product): array
+    {
+        $productId = $product->getId();
+        if (isset($this->assignedCategories[$productId])) {
+            return $this->assignedCategories[$productId];
+        }
+
         $categoryIds = [];
         if (method_exists($product, 'getCategoryIds')) {
             $categoryIds = $product->getCategoryIds();
         } elseif (method_exists($product, 'getData')) {
             $categoryIds = $product->getData('category_ids') ?: [];
         }
-        
-        $categoryNames = [];
-        foreach ($categoryIds as $categoryId) {
-            if ($categoryId <= 2) { // Skip root categories
-                continue;
-            }
-            
+        $categoryIds = array_values(array_unique(array_map('intval', (array)$categoryIds)));
+
+        $categories = [];
+        if ($categoryIds) {
             try {
-                $category = $this->categoryRepository->get($categoryId);
-                if ($category && $category->getName()) {
-                    $categoryNames[] = $category->getName();
+                // ponytail: '*' keeps the getData() fallback (trade-off 1/14) working for any category attribute
+                $collection = $this->categoryCollectionFactory->create()
+                    ->setStoreId((int)$this->storeManager->getStore()->getId())
+                    ->addAttributeToSelect('*')
+                    ->addIdFilter($categoryIds)
+                    ->addAttributeToFilter('level', ['gt' => 1]);
+                foreach ($categoryIds as $categoryId) {
+                    $category = $collection->getItemById($categoryId);
+                    if ($category) {
+                        $categories[$categoryId] = $category;
+                    }
                 }
             } catch (\Exception $e) {
-                // Continue to next category
-                continue;
+                $categories = [];
             }
         }
-        
-        return implode(', ', $categoryNames);
+
+        return $this->assignedCategories[$productId] = $categories;
     }
 
     /**
@@ -577,39 +577,6 @@ class ProductProcessor extends AbstractVariableProcessor
     }
 
     /**
-     * Get product custom attribute
-     *
-     * @param ProductInterface|Product $product
-     * @param string $attributeCode
-     * @return string
-     */
-    protected function getProductCustomAttribute(ProductInterface|Product $product, string $attributeCode): string
-    {
-        // Try getter method first
-        $method = 'get' . str_replace(' ', '', ucwords(str_replace('_', ' ', $attributeCode)));
-        if (method_exists($product, $method)) {
-            $value = $product->$method();
-            return $value !== null ? (string)$value : '';
-        }
-        
-        // Try custom attribute
-        if (method_exists($product, 'getCustomAttribute')) {
-            $attribute = $product->getCustomAttribute($attributeCode);
-            if ($attribute) {
-                return (string)$attribute->getValue();
-            }
-        }
-        
-        // Try getData
-        if (method_exists($product, 'getData')) {
-            $value = $product->getData($attributeCode);
-            return $value !== null ? (string)$value : '';
-        }
-        
-        return '';
-    }
-
-    /**
      * Get category image URL
      *
      * @param \Magento\Catalog\Api\Data\CategoryInterface $category
@@ -662,11 +629,8 @@ class ProductProcessor extends AbstractVariableProcessor
             return '';
         }
         
-        // Decode HTML entities
-        $content = html_entity_decode($content, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-        
-        // Remove HTML tags but preserve some content structure
-        $content = strip_tags($content);
+        // Decode entities, then remove real markup only (keeps bare "<" such as "<10 cm")
+        $content = $this->textCleaner->clean($content);
         
         // Remove Page Builder artifacts
         $content = preg_replace('/\[data-pb-style=[^\]]*\]/', '', $content);

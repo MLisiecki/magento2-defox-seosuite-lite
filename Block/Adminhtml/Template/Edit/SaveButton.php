@@ -25,23 +25,10 @@ class SaveButton extends GenericButton implements ButtonProviderInterface
         return [
             'label' => __('Save Template'),
             'class' => 'save primary',
-            'data_attribute' => [
-                'mage-init' => [
-                    'buttonAdapter' => [
-                        'actions' => [
-                            [
-                                'targetName' => 'defox_seosuite_template_form.defox_seosuite_template_form',
-                                'actionName' => 'save',
-                                'params' => [
-                                    false
-                                ]
-                            ]
-                        ]
-                    ]
-                ]
-            ],
+            // ponytail: no buttonAdapter - Magento_Ui/js/form/adapter already binds #save / #save_and_continue
+            // (ids come from the button keys in the form XML); binding both submitted the form twice
             'sort_order' => 30,
-            'aclResource' => 'Defox_SEOSuite::template',
+            'aclResource' => 'Defox_SEOSuite::template_save',
         ];
     }
 }

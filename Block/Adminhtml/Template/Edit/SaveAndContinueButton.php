@@ -25,23 +25,10 @@ class SaveAndContinueButton extends GenericButton implements ButtonProviderInter
         return [
             'label' => __('Save and Continue Edit'),
             'class' => 'save',
-            'data_attribute' => [
-                'mage-init' => [
-                    'buttonAdapter' => [
-                        'actions' => [
-                            [
-                                'targetName' => 'defox_seosuite_template_form.defox_seosuite_template_form',
-                                'actionName' => 'save',
-                                'params' => [
-                                    true
-                                ]
-                            ]
-                        ]
-                    ]
-                ]
-            ],
+            // ponytail: no buttonAdapter - Magento_Ui/js/form/adapter already binds #save / #save_and_continue
+            // (ids come from the button keys in the form XML); binding both submitted the form twice
             'sort_order' => 40,
-            'aclResource' => 'Defox_SEOSuite::template',
+            'aclResource' => 'Defox_SEOSuite::template_save',
         ];
     }
 }

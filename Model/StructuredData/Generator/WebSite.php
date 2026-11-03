@@ -16,7 +16,7 @@ use Magento\Store\Model\Store;
 /**
  * WebSite structured data generator
  * 
- * Generates schema.org WebSite structured data with Sitelinks Searchbox support.
+ * Generates schema.org WebSite structured data (no SearchAction: Google retired the Sitelinks Searchbox).
  */
 class WebSite extends AbstractGenerator
 {
@@ -44,27 +44,10 @@ class WebSite extends AbstractGenerator
             $data['alternateName'] = $alternateName;
         }
         
-        // Add Sitelinks Searchbox if enabled
-        if ($this->configHelper->isSitelinksSearchboxEnabled()) {
-            $data['potentialAction'] = $this->getSitelinksSearchbox();
-        }
-        
-        // Add publisher information if organization is enabled
-        if ($this->configHelper->isStructuredDataOrganizationEnabled()) {
-            $organizationName = $this->configHelper->getStructuredDataOrganizationName();
-            if ($organizationName) {
-                $data['publisher'] = [
-                    '@type' => 'Organization',
-                    'name' => $organizationName,
-                    'url' => $baseUrl
-                ];
-                
-                // Add logo if available
-                $logo = $this->configHelper->getStructuredDataOrganizationLogo();
-                if ($logo) {
-                    $data['publisher']['logo'] = $this->getLogoUrl($logo);
-                }
-            }
+        // Publisher: the store's Organization (one guard: enabled + non-empty name)
+        $organization = $this->organizationData->getNamedData();
+        if ($organization !== null) {
+            $data['publisher'] = $organization;
         }
         
         return $data;
@@ -102,62 +85,5 @@ class WebSite extends AbstractGenerator
     {
         return $this->configHelper->isStructuredDataWebsiteEnabled($storeId);
     }
-    
-    /**
-     * Get entity ID
-     *
-     * @param mixed $entity
-     * @return string|null
-     */
-    protected function getEntityId($entity): ?string
-    {
-        return 'website_' . $this->getStoreId();
-    }
-    
-    /**
-     * Get Sitelinks Searchbox configuration
-     *
-     * @return array
-     */
-    private function getSitelinksSearchbox(): array
-    {
-        $baseUrl = $this->storeManager->getStore()->getBaseUrl();
-        $searchUrl = $baseUrl . 'catalogsearch/result/?q={search_term_string}';
-        
-        // Allow custom search URL pattern
-        $customSearchUrl = $this->configHelper->getSitelinksSearchboxUrl();
-        if ($customSearchUrl) {
-            $searchUrl = str_replace(
-                ['{base_url}', '{search_term}'],
-                [$baseUrl, '{search_term_string}'],
-                $customSearchUrl
-            );
-        }
-        
-        return [
-            '@type' => 'SearchAction',
-            'target' => [
-                '@type' => 'EntryPoint',
-                'urlTemplate' => $searchUrl
-            ],
-            'query-input' => 'required name=search_term_string'
-        ];
-    }
-    
-    /**
-     * Get logo URL
-     *
-     * @param string $logoPath
-     * @return string
-     */
-    private function getLogoUrl(string $logoPath): string
-    {
-        if (filter_var($logoPath, FILTER_VALIDATE_URL)) {
-            return $logoPath;
-        }
-        
-        // Build full URL for relative path
-        $baseUrl = $this->storeManager->getStore()->getBaseUrl(\Magento\Framework\UrlInterface::URL_TYPE_MEDIA);
-        return $baseUrl . 'logo/' . ltrim($logoPath, '/');
-    }
+
 }

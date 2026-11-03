@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Defox\SEOSuite\Controller\Adminhtml\Sitemap;
 
 use Defox\SEOSuite\Helper\Config;
+use Defox\SEOSuite\Model\SafeErrorMessage;
 use Defox\SEOSuite\Model\Sitemap\Validator\AdvancedXmlValidator;
 use Defox\SEOSuite\Model\Sitemap\Validator\ValidationResult;
 use Magento\Backend\App\Action;
@@ -22,8 +23,8 @@ use Magento\Framework\Controller\ResultInterface;
 use Magento\Framework\Exception\LocalizedException;
 use Magento\Framework\Filesystem;
 use Magento\Framework\HTTP\Client\Curl;
+use Magento\Framework\UrlInterface;
 use Magento\Framework\View\Result\PageFactory;
-use Magento\MediaStorage\Model\File\UploaderFactory;
 use Magento\Store\Model\StoreManagerInterface;
 
 /**
@@ -54,6 +55,11 @@ class Validate extends Action implements HttpGetActionInterface, HttpPostActionI
     private const ALLOWED_EXTENSIONS = ['xml', 'gz'];
 
     /**
+     * Staging subdirectory of var/tmp for files under validation
+     */
+    private const STAGING_DIR = 'sitemap_validation';
+
+    /**
      * @var PageFactory
      */
     private PageFactory $resultPageFactory;
@@ -79,9 +85,9 @@ class Validate extends Action implements HttpGetActionInterface, HttpPostActionI
     private StoreManagerInterface $storeManager;
 
     /**
-     * @var UploaderFactory
+     * @var SafeErrorMessage
      */
-    private UploaderFactory $uploaderFactory;
+    private SafeErrorMessage $safeErrorMessage;
 
     /**
      * @var Filesystem
@@ -102,9 +108,9 @@ class Validate extends Action implements HttpGetActionInterface, HttpPostActionI
      * @param Config $config
      * @param AdvancedXmlValidator $validator
      * @param StoreManagerInterface $storeManager
-     * @param UploaderFactory $uploaderFactory
      * @param Filesystem $filesystem
      * @param Curl $curl
+     * @param SafeErrorMessage $safeErrorMessage
      */
     public function __construct(
         Context $context,
@@ -113,9 +119,9 @@ class Validate extends Action implements HttpGetActionInterface, HttpPostActionI
         Config $config,
         AdvancedXmlValidator $validator,
         StoreManagerInterface $storeManager,
-        UploaderFactory $uploaderFactory,
         Filesystem $filesystem,
-        Curl $curl
+        Curl $curl,
+        SafeErrorMessage $safeErrorMessage
     ) {
         parent::__construct($context);
         $this->resultPageFactory = $resultPageFactory;
@@ -123,9 +129,9 @@ class Validate extends Action implements HttpGetActionInterface, HttpPostActionI
         $this->config = $config;
         $this->validator = $validator;
         $this->storeManager = $storeManager;
-        $this->uploaderFactory = $uploaderFactory;
         $this->filesystem = $filesystem;
         $this->curl = $curl;
+        $this->safeErrorMessage = $safeErrorMessage;
     }
 
     /**
@@ -135,21 +141,16 @@ class Validate extends Action implements HttpGetActionInterface, HttpPostActionI
      */
     public function execute(): ResultInterface
     {
-        // Check if this is an AJAX action request
-        $ajaxAction = $this->getRequest()->getParam('ajax_action');
-        if ($ajaxAction) {
-            return $this->handleAjaxRequest();
-        }
-        
-        if ($this->getRequest()->isPost()) {
-            return $this->processValidation();
+        // GET only renders the page; every action (and its form_key check) requires POST
+        if (!$this->getRequest()->isPost()) {
+            return $this->showValidationForm();
         }
 
-        if ($this->getRequest()->isAjax()) {
+        if ($this->getRequest()->getParam('ajax_action')) {
             return $this->handleAjaxRequest();
         }
 
-        return $this->showValidationForm();
+        return $this->processValidation();
     }
 
     /**
@@ -185,7 +186,7 @@ class Validate extends Action implements HttpGetActionInterface, HttpPostActionI
                     break;
                     
                 case 'url_validation':
-                    $url = $this->getRequest()->getParam('sitemap_url');
+                    $url = (string)$this->getRequest()->getParam('sitemap_url');
                     $validationResult = $this->validateSitemapFromUrl($url, $validationOptions);
                     break;
                     
@@ -205,10 +206,11 @@ class Validate extends Action implements HttpGetActionInterface, HttpPostActionI
             ]);
             
         } catch (\Exception $e) {
+            $message = $this->safeErrorMessage->get($e);
             return $result->setData([
                 'success' => false,
-                'message' => __('Validation failed: %1', $e->getMessage()),
-                'error' => $e->getMessage()
+                'message' => __('Validation failed: %1', $message),
+                'error' => $message
             ]);
         }
     }
@@ -229,12 +231,8 @@ class Validate extends Action implements HttpGetActionInterface, HttpPostActionI
                     return $result->setData($this->getCurrentSitemaps());
                     
                 case 'validate_url':
-                    $url = $this->getRequest()->getParam('url');
+                    $url = (string)$this->getRequest()->getParam('url');
                     return $result->setData($this->checkUrlAccessibility($url));
-                    
-                case 'get_validation_progress':
-                    $sessionId = $this->getRequest()->getParam('session_id');
-                    return $result->setData($this->getValidationProgress($sessionId));
                     
                 default:
                     throw new LocalizedException(__('Invalid AJAX action: %1', $action));
@@ -243,7 +241,7 @@ class Validate extends Action implements HttpGetActionInterface, HttpPostActionI
         } catch (\Exception $e) {
             return $result->setData([
                 'success' => false,
-                'error' => $e->getMessage()
+                'error' => $this->safeErrorMessage->get($e)
             ]);
         }
     }
@@ -257,43 +255,25 @@ class Validate extends Action implements HttpGetActionInterface, HttpPostActionI
      */
     private function validateUploadedFile(array $options): ValidationResult
     {
-        try {
-            $uploader = $this->uploaderFactory->create(['fileId' => 'sitemap_file']);
-            $uploader->setAllowedExtensions(self::ALLOWED_EXTENSIONS);
-            $uploader->setAllowRenameFiles(true);
-            $uploader->setFilesDispersion(true);
-            
-            $mediaDir = $this->filesystem->getDirectoryWrite(DirectoryList::MEDIA);
-            $uploadPath = $mediaDir->getAbsolutePath('sitemap_validation/');
-            
-            if (!$mediaDir->isExist('sitemap_validation')) {
-                $mediaDir->create('sitemap_validation');
-            }
-            
-            $result = $uploader->save($uploadPath);
-            $filePath = $uploadPath . $result['file'];
-            
-            // Validate file size
-            if (filesize($filePath) > self::MAX_FILE_SIZE) {
-                unlink($filePath);
-                throw new LocalizedException(__('File size exceeds maximum limit of %1MB', self::MAX_FILE_SIZE / 1024 / 1024));
-            }
-            
-            // Decompress if needed
-            if ($result['type'] === 'application/gzip' || pathinfo($filePath, PATHINFO_EXTENSION) === 'gz') {
-                $filePath = $this->decompressFile($filePath);
-            }
-            
-            $validationResult = $this->validator->validateComprehensive($filePath, $options);
-            
-            // Cleanup
-            unlink($filePath);
-            
-            return $validationResult;
-            
-        } catch (\Exception $e) {
-            throw new LocalizedException(__('File upload validation failed: %1', $e->getMessage()));
+        $file = $this->getRequest()->getFiles('sitemap_file');
+        if (!is_array($file)
+            || ($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK
+            || !is_uploaded_file((string)$file['tmp_name'])
+        ) {
+            throw new LocalizedException(__('File upload failed. Please select a sitemap file.'));
         }
+
+        $extension = strtolower(pathinfo((string)$file['name'], PATHINFO_EXTENSION));
+        if (!in_array($extension, self::ALLOWED_EXTENSIONS, true)) {
+            throw new LocalizedException(__('Only XML and GZ files are allowed.'));
+        }
+
+        if ((int)$file['size'] > self::MAX_FILE_SIZE) {
+            throw new LocalizedException(__('File size exceeds maximum limit of %1MB', self::MAX_FILE_SIZE / 1024 / 1024));
+        }
+
+        // PHP's own upload temp file is removed by PHP at the end of the request
+        return $this->validateStagedCopy((string)$file['tmp_name'], $options);
     }
 
     /**
@@ -306,51 +286,43 @@ class Validate extends Action implements HttpGetActionInterface, HttpPostActionI
      */
     private function validateSitemapFromUrl(string $url, array $options): ValidationResult
     {
-        if (!filter_var($url, FILTER_VALIDATE_URL)) {
-            throw new LocalizedException(__('Invalid URL format'));
-        }
-        
+        $this->assertOwnStoreUrl($url);
+
+        $this->curl->setTimeout(30);
+        $this->curl->setOption(CURLOPT_FOLLOWLOCATION, false);
+        $this->curl->setOption(CURLOPT_MAXFILESIZE, self::MAX_FILE_SIZE);
         try {
-            // Download sitemap content
-            $this->curl->setTimeout(30);
-            $this->curl->setOption(CURLOPT_FOLLOWLOCATION, true);
-            $this->curl->setOption(CURLOPT_MAXREDIRS, 5);
             $this->curl->get($url);
-            
-            $httpCode = $this->curl->getStatus();
-            if ($httpCode !== 200) {
-                throw new LocalizedException(__('Unable to access sitemap URL. HTTP status: %1', $httpCode));
-            }
-            
-            $content = $this->curl->getBody();
-            if (empty($content)) {
-                throw new LocalizedException(__('Empty response from sitemap URL'));
-            }
-            
-            // Check if content is gzipped
-            if (substr($content, 0, 2) === "\x1f\x8b") {
-                $content = gzdecode($content);
-            }
-            
-            // Save to temporary file for validation
-            $tmpFile = tempnam(sys_get_temp_dir(), 'sitemap_validation_');
-            file_put_contents($tmpFile, $content);
-            
-            $validationResult = $this->validator->validateComprehensive($tmpFile, $options);
-            
-            // Add URL-specific information
-            $validationResult->addMetadata('source_url', $url);
-            $validationResult->addMetadata('content_length', strlen($content));
-            $validationResult->addMetadata('http_status', $httpCode);
-            
-            // Cleanup
-            unlink($tmpFile);
-            
-            return $validationResult;
-            
         } catch (\Exception $e) {
-            throw new LocalizedException(__('URL validation failed: %1', $e->getMessage()));
+            throw new LocalizedException(__('Unable to access sitemap URL: %1', $e->getMessage()));
         }
+
+        $httpCode = $this->curl->getStatus();
+        if ($httpCode !== 200) {
+            throw new LocalizedException(__('Unable to access sitemap URL. HTTP status: %1', $httpCode));
+        }
+
+        $content = $this->curl->getBody();
+        if ($content === '') {
+            throw new LocalizedException(__('Empty response from sitemap URL'));
+        }
+
+        $tmpDir = $this->filesystem->getDirectoryWrite(DirectoryList::TMP);
+        $download = self::STAGING_DIR . '/' . bin2hex(random_bytes(16)) . '.download';
+        try {
+            $tmpDir->writeFile($download, $content);
+            $validationResult = $this->validateStagedCopy($tmpDir->getAbsolutePath($download), $options);
+        } finally {
+            if ($tmpDir->isExist($download)) {
+                $tmpDir->delete($download);
+            }
+        }
+
+        $validationResult->addMetadata('source_url', $url);
+        $validationResult->addMetadata('content_length', strlen($content));
+        $validationResult->addMetadata('http_status', $httpCode);
+
+        return $validationResult;
     }
 
     /**
@@ -363,60 +335,24 @@ class Validate extends Action implements HttpGetActionInterface, HttpPostActionI
      */
     private function validateCurrentSitemap(int $storeId, array $options): ValidationResult
     {
-        try {
-            $store = $this->storeManager->getStore($storeId);
-            $sitemapPath = $this->config->getSitemapPath($storeId);
-            
-            // Get the pub directory
-            $pubDir = $this->filesystem->getDirectoryRead(DirectoryList::PUB);
-            $basePath = $pubDir->getAbsolutePath($sitemapPath);
-            
-            // Check possible sitemap files (both compressed and uncompressed)
-            $possibleFiles = [
-                $basePath . 'sitemap_index.xml.gz',
-                $basePath . 'sitemap_index.xml',
-                $basePath . 'sitemap.xml.gz', 
-                $basePath . 'sitemap.xml'
-            ];
-            
-            $filePath = null;
-            foreach ($possibleFiles as $file) {
-                if (file_exists($file)) {
-                    $filePath = $file;
-                    break;
-                }
-            }
-            
-            if (!$filePath) {
-                throw new LocalizedException(__('Sitemap file not found for store %1. Generate sitemap first.', $store->getName()));
-            }
-            
-            // If file is compressed, decompress it for validation
-            $validationFile = $filePath;
-            if (pathinfo($filePath, PATHINFO_EXTENSION) === 'gz') {
-                $validationFile = $this->decompressFileForValidation($filePath);
-            }
-            
-            $validationResult = $this->validator->validateComprehensive($validationFile, $options);
-            
-            // Add store-specific information
-            $validationResult->addMetadata('store_id', $storeId);
-            $validationResult->addMetadata('store_name', $store->getName());
-            $validationResult->addMetadata('file_path', $filePath);
-            $validationResult->addMetadata('file_size', filesize($filePath));
-            $validationResult->addMetadata('last_modified', filemtime($filePath));
-            $validationResult->addMetadata('is_compressed', pathinfo($filePath, PATHINFO_EXTENSION) === 'gz');
-            
-            // Cleanup temporary file if created
-            if ($validationFile !== $filePath) {
-                unlink($validationFile);
-            }
-            
-            return $validationResult;
-            
-        } catch (\Exception $e) {
-            throw new LocalizedException(__('Current sitemap validation failed: %1', $e->getMessage()));
+        $store = $this->storeManager->getStore($storeId);
+        $fileName = $this->config->getPublishedSitemapFileName($storeId);
+
+        if ($fileName === null) {
+            throw new LocalizedException(__('Sitemap file not found for store %1. Generate sitemap first.', $store->getName()));
         }
+        $filePath = $this->config->getFullSitemapPath($storeId) . $fileName;
+
+        $validationResult = $this->validateStagedCopy($filePath, $options);
+
+        // Add store-specific information
+        $validationResult->addMetadata('store_id', $storeId);
+        $validationResult->addMetadata('store_name', $store->getName());
+        $validationResult->addMetadata('file_size', filesize($filePath));
+        $validationResult->addMetadata('last_modified', filemtime($filePath));
+        $validationResult->addMetadata('is_compressed', pathinfo($filePath, PATHINFO_EXTENSION) === 'gz');
+
+        return $validationResult;
     }
 
     /**
@@ -441,50 +377,119 @@ class Validate extends Action implements HttpGetActionInterface, HttpPostActionI
     }
 
     /**
-     * Decompress gzipped file
+     * Copy a (possibly gzipped) sitemap to var/tmp under a random name, validate it, always remove the copy
      *
-     * @param string $filePath
-     * @return string
+     * @param string $source
+     * @param array $options
+     * @return ValidationResult
      * @throws LocalizedException
      */
-    private function decompressFile(string $filePath): string
+    private function validateStagedCopy(string $source, array $options): ValidationResult
     {
-        $compressedContent = file_get_contents($filePath);
-        $decompressedContent = gzdecode($compressedContent);
-        
-        if ($decompressedContent === false) {
-            throw new LocalizedException(__('Failed to decompress gzipped file'));
+        $staged = $this->stageXml($source);
+        try {
+            return $this->validator->validateComprehensive($staged, $options);
+        } finally {
+            unlink($staged);
         }
-        
-        $newPath = str_replace('.gz', '', $filePath);
-        file_put_contents($newPath, $decompressedContent);
-        
-        // Remove original compressed file
-        unlink($filePath);
-        
-        return $newPath;
     }
-    
+
     /**
-     * Decompress gzipped file for validation (without removing original)
+     * Stream-decompress $source into var/tmp/sitemap_validation/<random>.xml, capped at MAX_FILE_SIZE bytes
      *
-     * @param string $filePath
-     * @return string
+     * gzread() passes non-gzip input through unchanged, so plain XML is simply copied.
+     *
+     * @param string $source
+     * @return string Absolute path of the staged file
      * @throws LocalizedException
      */
-    private function decompressFileForValidation(string $filePath): string
+    private function stageXml(string $source): string
     {
-        $compressedContent = file_get_contents($filePath);
-        $decompressedContent = gzdecode($compressedContent);
-        
-        if ($decompressedContent === false) {
-            throw new LocalizedException(__('Failed to decompress gzipped file'));
+        $tmpDir = $this->filesystem->getDirectoryWrite(DirectoryList::TMP);
+        $tmpDir->create(self::STAGING_DIR);
+        $target = $tmpDir->getAbsolutePath(self::STAGING_DIR . '/' . bin2hex(random_bytes(16)) . '.xml');
+
+        $in = gzopen($source, 'rb');
+        if ($in === false) {
+            throw new LocalizedException(__('Unable to read the sitemap file.'));
         }
-        
-        $tempPath = tempnam(sys_get_temp_dir(), 'sitemap_validation_');
-        file_put_contents($tempPath, $decompressedContent);
-        
-        return $tempPath;
+        $out = fopen($target, 'xb');
+        if ($out === false) {
+            gzclose($in);
+            throw new LocalizedException(__('Unable to create a temporary file.'));
+        }
+
+        $complete = false;
+        $written = 0;
+        try {
+            while (!gzeof($in)) {
+                $chunk = gzread($in, 1048576);
+                if ($chunk === false) {
+                    throw new LocalizedException(__('Failed to decompress gzipped file'));
+                }
+                $written += strlen($chunk);
+                if ($written > self::MAX_FILE_SIZE) {
+                    throw new LocalizedException(
+                        __('Uncompressed sitemap exceeds maximum size of %1MB', self::MAX_FILE_SIZE / 1024 / 1024)
+                    );
+                }
+                fwrite($out, $chunk);
+            }
+            $complete = true;
+        } finally {
+            gzclose($in);
+            fclose($out);
+            if (!$complete) {
+                unlink($target);
+            }
+        }
+
+        return $target;
+    }
+
+    /**
+     * SSRF guard used by every outbound request: http(s) only, host:port must be a store base URL host:port
+     *
+     * @param string $url
+     * @return void
+     * @throws LocalizedException
+     */
+    private function assertOwnStoreUrl(string $url): void
+    {
+        $allowed = [];
+        foreach ($this->storeManager->getStores() as $store) {
+            $allowed[] = $this->getHostPort((string)$store->getBaseUrl(UrlInterface::URL_TYPE_WEB, false));
+            $allowed[] = $this->getHostPort((string)$store->getBaseUrl(UrlInterface::URL_TYPE_WEB, true));
+        }
+
+        $hostPort = $this->getHostPort($url);
+        if ($hostPort === null || !in_array($hostPort, $allowed, true)) {
+            throw new LocalizedException(__('Only URLs on this store\'s own domains can be checked.'));
+        }
+    }
+
+    /**
+     * Normalised "host:port" of an http(s) URL, or null if the URL is not acceptable
+     *
+     * @param string $url
+     * @return string|null
+     */
+    private function getHostPort(string $url): ?string
+    {
+        if (preg_match('/[\x00-\x20\\\\]/', $url)) {
+            return null;
+        }
+        $parts = parse_url($url);
+        $scheme = strtolower((string)($parts['scheme'] ?? ''));
+        if (!in_array($scheme, ['http', 'https'], true)
+            || empty($parts['host'])
+            || isset($parts['user'])
+            || isset($parts['pass'])
+        ) {
+            return null;
+        }
+
+        return strtolower($parts['host']) . ':' . ($parts['port'] ?? ($scheme === 'https' ? 443 : 80));
     }
 
     /**
@@ -496,69 +501,37 @@ class Validate extends Action implements HttpGetActionInterface, HttpPostActionI
     {
         $sitemaps = [];
         
-        // Add debugging
-        $debugInfo = [];
-        $debugInfo['stores_count'] = count($this->storeManager->getStores());
-        
         foreach ($this->storeManager->getStores() as $store) {
             if (!$store->getIsActive()) {
                 continue;
             }
             
             $storeId = (int)$store->getId();
-            $sitemapPath = $this->config->getSitemapPath($storeId);
-            
-            $debugInfo['store_' . $storeId] = [
-                'name' => $store->getName(),
-                'sitemap_path' => $sitemapPath
-            ];
-            
-            // Get the pub directory
-            $pubDir = $this->filesystem->getDirectoryRead(DirectoryList::PUB);
-            $basePath = $pubDir->getAbsolutePath($sitemapPath);
-            
-            $debugInfo['store_' . $storeId]['base_path'] = $basePath;
-            
-            // Check possible sitemap files (both compressed and uncompressed)
-            $possibleFiles = [
-                'sitemap_index.xml.gz' => $basePath . 'sitemap_index.xml.gz',
-                'sitemap_index.xml' => $basePath . 'sitemap_index.xml',
-                'sitemap.xml.gz' => $basePath . 'sitemap.xml.gz',
-                'sitemap.xml' => $basePath . 'sitemap.xml'
-            ];
-            
-            $debugInfo['store_' . $storeId]['possible_files'] = [];
-            foreach ($possibleFiles as $name => $file) {
-                $exists = file_exists($file);
-                $debugInfo['store_' . $storeId]['possible_files'][$name] = [
-                    'path' => $file,
-                    'exists' => $exists
-                ];
+
+            try {
+                $fileName = $this->config->getPublishedSitemapFileName($storeId);
+                $filePath = $fileName === null ? null : $this->config->getFullSitemapPath($storeId) . $fileName;
+                $url = $this->config->getSitemapUrl(
+                    $storeId,
+                    $fileName ?? $this->config->getSitemapFileName($storeId)
+                );
+            } catch (LocalizedException $e) {
+                // Invalid stored path: list the store without a file instead of failing the whole listing
+                $fileName = $filePath = null;
+                $url = '';
             }
-            
-            $filePath = null;
-            $fileName = null;
-            foreach ($possibleFiles as $name => $file) {
-                if (file_exists($file)) {
-                    $filePath = $file;
-                    $fileName = $name;
-                    break;
-                }
-            }
-            
+
             $exists = $filePath !== null;
-            $debugInfo['store_' . $storeId]['found_file'] = $filePath;
             
             $sitemapInfo = [
                 'store_id' => $storeId,
                 'store_name' => $store->getName(),
                 'store_code' => $store->getCode(),
                 'exists' => $exists,
-                'path' => $filePath,
                 'filename' => $fileName,
                 'size' => $exists ? filesize($filePath) : 0,
                 'last_modified' => $exists ? filemtime($filePath) : null,
-                'url' => $store->getBaseUrl() . $sitemapPath . ($fileName ?: 'sitemap.xml'),
+                'url' => $url,
                 'is_compressed' => $exists && pathinfo($filePath, PATHINFO_EXTENSION) === 'gz'
             ];
             
@@ -572,8 +545,7 @@ class Validate extends Action implements HttpGetActionInterface, HttpPostActionI
         
         return [
             'success' => true,
-            'sitemaps' => $sitemaps,
-            'debug' => $debugInfo // Add debug info
+            'sitemaps' => $sitemaps
         ];
     }
 
@@ -586,48 +558,31 @@ class Validate extends Action implements HttpGetActionInterface, HttpPostActionI
     private function checkUrlAccessibility(string $url): array
     {
         try {
+            $this->assertOwnStoreUrl($url);
             $startTime = microtime(true);
-            
+
             $this->curl->setTimeout(10);
             $this->curl->setOption(CURLOPT_NOBODY, true); // HEAD request
+            $this->curl->setOption(CURLOPT_FOLLOWLOCATION, false);
             $this->curl->get($url);
-            
+
             $httpCode = $this->curl->getStatus();
             $responseTime = round((microtime(true) - $startTime) * 1000, 2);
-            
+
             return [
                 'success' => true,
                 'accessible' => $httpCode === 200,
                 'http_status' => $httpCode,
-                'response_time' => $responseTime,
-                'headers' => $this->curl->getHeaders()
+                'response_time' => $responseTime
             ];
-            
+
         } catch (\Exception $e) {
             return [
                 'success' => false,
                 'accessible' => false,
-                'error' => $e->getMessage()
+                'error' => $this->safeErrorMessage->get($e)
             ];
         }
-    }
-
-    /**
-     * Get validation progress (placeholder for long-running validations)
-     *
-     * @param string $sessionId
-     * @return array
-     */
-    private function getValidationProgress(string $sessionId): array
-    {
-        // This would track progress of long-running validations
-        // For now, return placeholder data
-        return [
-            'success' => true,
-            'progress' => 100,
-            'status' => 'completed',
-            'message' => 'Validation completed'
-        ];
     }
 
     /**

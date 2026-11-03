@@ -64,26 +64,4 @@ class Template extends AbstractDb
 
         return parent::_beforeSave($object);
     }
-
-    /**
-     * Get templates by type, entity type and store id
-     *
-     * @param string $type
-     * @param string $entityType
-     * @param int $storeId
-     * @return array
-     */
-    public function getByTypeAndEntityType(string $type, string $entityType, int $storeId): array
-    {
-        $connection = $this->getConnection();
-        $select = $connection->select()
-            ->from($this->getMainTable())
-            ->where('type = ?', $type)
-            ->where('entity_type = ?', $entityType)
-            ->where('store_id IN (0, ?)', $storeId)
-            ->where('is_active = 1')
-            ->order('priority DESC');
-
-        return $connection->fetchAll($select);
-    }
 }

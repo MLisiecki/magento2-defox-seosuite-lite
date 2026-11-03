@@ -10,11 +10,12 @@ declare(strict_types=1);
 
 namespace Defox\SEOSuite\Plugin\Catalog\Product;
 
+use Magento\Catalog\Model\Locator\LocatorInterface;
 use Magento\Catalog\Model\Product;
 use Magento\Catalog\Ui\DataProvider\Product\Form\Modifier\AbstractModifier;
 use Magento\Catalog\Ui\DataProvider\Product\Form\Modifier\General;
 use Magento\Framework\App\RequestInterface;
-use Magento\Framework\Registry;
+use Magento\Framework\Exception\NotFoundException;
 use Magento\Framework\Stdlib\ArrayManager;
 
 /**
@@ -28,9 +29,11 @@ class ExcludeCanonical
     private ArrayManager $arrayManager;
 
     /**
-     * @var Registry
+     * Product of the edit form (the same locator core's form modifiers use)
+     *
+     * @var LocatorInterface
      */
-    private Registry $registry;
+    private LocatorInterface $locator;
 
     /**
      * @var RequestInterface
@@ -39,16 +42,16 @@ class ExcludeCanonical
 
     /**
      * @param ArrayManager $arrayManager
-     * @param Registry $registry
+     * @param LocatorInterface $locator
      * @param RequestInterface $request
      */
     public function __construct(
         ArrayManager $arrayManager,
-        Registry $registry,
+        LocatorInterface $locator,
         RequestInterface $request
     ) {
         $this->arrayManager = $arrayManager;
-        $this->registry = $registry;
+        $this->locator = $locator;
         $this->request = $request;
     }
 
@@ -97,7 +100,11 @@ class ExcludeCanonical
         $productId = $this->request->getParam('id');
         
         if ($productId) {
-            $product = $this->registry->registry('product');
+            try {
+                $product = $this->locator->getProduct();
+            } catch (NotFoundException $e) {
+                return $result;
+            }
             
             if ($product instanceof Product) {
                 $seoCanonicalDisabled = $product->getData('seo_canonical_disabled') ?? 0;

@@ -7,10 +7,11 @@
 
 define([
     'jquery',
+    'underscore',
     'Magento_Ui/js/modal/alert',
     'Magento_Ui/js/modal/confirm',
     'domReady!'
-], function ($, alert, confirm) {
+], function ($, _, alert, confirm) {
     'use strict';
 
     /**
@@ -389,7 +390,7 @@ define([
             showAlert: function(title, content) {
                 alert({
                     title: title,
-                    content: content,
+                    content: _.escape(content),
                     buttons: [{
                         text: 'OK',
                         class: 'action-primary',
@@ -472,19 +473,19 @@ define([
 
                     var details = '';
                     if (result.http_status) {
-                        details += '<p>HTTP Status: ' + result.http_status + '</p>';
+                        details += '<p>HTTP Status: ' + _.escape(result.http_status) + '</p>';
                     }
                     if (result.response_time) {
-                        details += '<p>Response Time: ' + result.response_time + 'ms</p>';
+                        details += '<p>Response Time: ' + _.escape(result.response_time) + 'ms</p>';
                     }
                     if (result.content_type) {
-                        details += '<p>Content Type: ' + result.content_type + '</p>';
+                        details += '<p>Content Type: ' + _.escape(result.content_type) + '</p>';
                     }
                     $details.html(details);
                 } else {
                     $status.removeClass('status-success').addClass('status-error');
                     $statusText.text('URL is not accessible');
-                    $details.html('<p>Error: ' + (result.error || 'HTTP ' + result.http_status) + '</p>');
+                    $details.html('<p>Error: ' + _.escape(result.error || 'HTTP ' + result.http_status) + '</p>');
                 }
 
                 $resultDiv.fadeIn(300);
@@ -587,23 +588,24 @@ define([
                     var card = $('<div class="sitemap-card">');
                     card.css('animation-delay', (index * 0.1) + 's');
 
-                    card.append('<h4>' + sitemap.store_name + ' (' + sitemap.store_code + ')</h4>');
+                    card.append($('<h4>').text(sitemap.store_name + ' (' + sitemap.store_code + ')'));
 
                     if (sitemap.exists) {
                         card.append('<p class="sitemap-status status-success">✓ Available</p>');
                         if (sitemap.formatted_size) {
-                            card.append('<p class="sitemap-info"><strong>Size:</strong> ' + sitemap.formatted_size + '</p>');
+                            card.append('<p class="sitemap-info"><strong>Size:</strong> ' + _.escape(sitemap.formatted_size) + '</p>');
                         }
                         if (sitemap.formatted_date) {
-                            card.append('<p class="sitemap-info"><strong>Modified:</strong> ' + sitemap.formatted_date + '</p>');
+                            card.append('<p class="sitemap-info"><strong>Modified:</strong> ' + _.escape(sitemap.formatted_date) + '</p>');
                         }
                         if (sitemap.filename) {
-                            card.append('<p class="sitemap-info"><strong>File:</strong> ' + sitemap.filename + '</p>');
+                            card.append('<p class="sitemap-info"><strong>File:</strong> ' + _.escape(sitemap.filename) + '</p>');
                         }
                         if (sitemap.is_compressed) {
                             card.append('<p class="sitemap-note">Compressed (GZ)</p>');
                         }
-                        card.append('<a href="' + sitemap.url + '" target="_blank" class="action-secondary action-small">View Sitemap</a>');
+                        card.append($('<a target="_blank" rel="noopener" class="action-secondary action-small">View Sitemap</a>')
+                            .attr('href', /^https?:\/\//i.test(sitemap.url) ? sitemap.url : '#'));
                     } else {
                         card.append('<p class="sitemap-status status-error">✗ Not Found</p>');
                         card.append('<p class="sitemap-note">Generate sitemap first</p>');
@@ -875,7 +877,7 @@ define([
                 html += '<div class="card-icon ' + scoreClass + '"><i class="icon-chart"></i></div>';
                 html += '<div class="card-content">';
                 html += '<h3>SEO Score</h3>';
-                html += '<p>' + result.score + '/100</p>';
+                html += '<p>' + _.escape(result.score) + '/100</p>';
                 html += '</div></div>';
                 
                 // Errors Card
@@ -913,12 +915,12 @@ define([
                         html += '<div class="issue-item error-item">';
                         html += '<div class="issue-icon"><i class="icon-close"></i></div>';
                         html += '<div class="issue-content">';
-                        html += '<h4>' + (error.message || 'Unknown error') + '</h4>';
+                        html += '<h4>' + _.escape(error.message || 'Unknown error') + '</h4>';
                         if (error.line) {
-                            html += '<p class="issue-location">Line: ' + error.line + (error.column ? ', Column: ' + error.column : '') + '</p>';
+                            html += '<p class="issue-location">Line: ' + _.escape(error.line) + (error.column ? ', Column: ' + _.escape(error.column) : '') + '</p>';
                         }
                         if (error.code) {
-                            html += '<p class="issue-code">Code: ' + error.code + '</p>';
+                            html += '<p class="issue-code">Code: ' + _.escape(error.code) + '</p>';
                         }
                         html += '</div></div>';
                     });
@@ -936,9 +938,9 @@ define([
                         html += '<div class="issue-item warning-item">';
                         html += '<div class="issue-icon"><i class="icon-warning"></i></div>';
                         html += '<div class="issue-content">';
-                        html += '<h4>' + (warning.message || 'Unknown warning') + '</h4>';
+                        html += '<h4>' + _.escape(warning.message || 'Unknown warning') + '</h4>';
                         if (warning.recommendation) {
-                            html += '<p class="issue-recommendation">Recommendation: ' + warning.recommendation + '</p>';
+                            html += '<p class="issue-recommendation">Recommendation: ' + _.escape(warning.recommendation) + '</p>';
                         }
                         html += '</div></div>';
                     });
@@ -965,8 +967,8 @@ define([
                             }
                             
                             html += '<div class="metadata-item">';
-                            html += '<span class="metadata-key">' + displayKey + ':</span>';
-                            html += '<span class="metadata-value">' + value + '</span>';
+                            html += '<span class="metadata-key">' + _.escape(displayKey) + ':</span>';
+                            html += '<span class="metadata-value">' + _.escape(value) + '</span>';
                             html += '</div>';
                         }
                     }
@@ -990,15 +992,16 @@ define([
                 html += '<div class="recommendations-list">';
                 
                 recommendations.forEach(function(rec) {
-                    var priorityClass = 'priority-' + (rec.priority || 'low');
+                    var priority = String(rec.priority || 'low');
+                    var priorityClass = 'priority-' + _.escape(priority);
                     
                     html += '<div class="recommendation-item ' + priorityClass + '">';
-                    html += '<div class="rec-priority">' + (rec.priority || 'low').toUpperCase() + '</div>';
+                    html += '<div class="rec-priority">' + _.escape(priority.toUpperCase()) + '</div>';
                     html += '<div class="rec-content">';
-                    html += '<h4>' + (rec.title || 'Recommendation') + '</h4>';
-                    html += '<p>' + (rec.description || '') + '</p>';
+                    html += '<h4>' + _.escape(rec.title || 'Recommendation') + '</h4>';
+                    html += '<p>' + _.escape(rec.description || '') + '</p>';
                     if (rec.action) {
-                        html += '<p class="rec-action">Action: ' + rec.action + '</p>';
+                        html += '<p class="rec-action">Action: ' + _.escape(rec.action) + '</p>';
                     }
                     html += '</div></div>';
                 });

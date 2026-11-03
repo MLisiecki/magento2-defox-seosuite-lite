@@ -11,12 +11,15 @@ declare(strict_types=1);
 namespace Defox\SEOSuite\Model\Canonical;
 
 use Defox\SEOSuite\Helper\Config;
+use Magento\Catalog\Model\Layer\Category\FilterableAttributeList;
 use Magento\Framework\App\Request\Http;
-use Magento\Framework\Registry;
 use Magento\Framework\View\Page\Config as PageConfig;
 
 /**
- * Class to handle robots tags
+ * Single source of the "should this page be NOINDEX" decision.
+ *
+ * Used by the robots meta plugin and by the canonical observers (canonical is suppressed on NOINDEX pages),
+ * so both always see the same value (CR-13, CR-14).
  */
 class RobotsHandler
 {
@@ -31,11 +34,6 @@ class RobotsHandler
     private Http $request;
 
     /**
-     * @var Registry
-     */
-    private Registry $registry;
-
-    /**
      * @var PageConfig
      */
     private PageConfig $pageConfig;
@@ -46,124 +44,137 @@ class RobotsHandler
     private Exclusion $exclusion;
 
     /**
+     * @var FilterableAttributeList
+     */
+    private FilterableAttributeList $filterableAttributes;
+
+    /**
+     * @var string[]|null
+     */
+    private ?array $filterVars = null;
+
+    /**
      * @param Config $config
      * @param Http $request
-     * @param Registry $registry
      * @param PageConfig $pageConfig
      * @param Exclusion $exclusion
+     * @param FilterableAttributeList $filterableAttributes
      */
     public function __construct(
         Config $config,
         Http $request,
-        Registry $registry,
         PageConfig $pageConfig,
-        Exclusion $exclusion
+        Exclusion $exclusion,
+        FilterableAttributeList $filterableAttributes
     ) {
         $this->config = $config;
         $this->request = $request;
-        $this->registry = $registry;
         $this->pageConfig = $pageConfig;
         $this->exclusion = $exclusion;
+        $this->filterableAttributes = $filterableAttributes;
     }
 
     /**
-     * Check if page should have NOINDEX based on current parameters
+     * Check if the current page should be NOINDEX
      *
      * @return bool
      */
     public function shouldAddNoindex(): bool
     {
-        // Check if we're on a category page with filters
-        if ($this->isFilteredCategoryPage()) {
-            return $this->shouldNoindexFilteredCategoryPage();
+        if (!$this->config->isEnabled() || !$this->config->isCanonicalEnabled()) {
+            return false;
         }
-        
-        // Check if we're on a category page with pagination
-        if ($this->isPaginatedCategoryPage()) {
-            return $this->shouldNoindexPaginatedCategoryPage();
-        }
-        
-        // Check if we're on an excluded page
-        if ($this->exclusion->isPageExcluded()) {
-            return true;
-        }
-        
-        return false;
+
+        $action = (string)$this->request->getFullActionName();
+        $canonicalForFilters = $this->config->shouldUseCanonicalForCategoryFilters();
+
+        return self::isNoindex(
+            $action,
+            $this->request->getParams(),
+            $action === 'catalog_category_view' && !$canonicalForFilters ? $this->getFilterVars() : [],
+            $this->exclusion->isPageExcluded(),
+            $canonicalForFilters,
+            $this->config->shouldUseCanonicalForCategoryPagination()
+        );
     }
 
     /**
-     * Apply robots meta tag
+     * Pure decision: NOINDEX when the URL is excluded, or a category page is filtered/paginated and the
+     * matching "use canonical" option is off. Only request vars of category-layer filters count as
+     * filters; tracking (utm_*, gclid, fbclid), sort/limit/mode and any other params never do.
+     *
+     * @param string $fullActionName
+     * @param array $params Request params
+     * @param string[] $filterVars Request vars of the category layered-navigation filters
+     * @param bool $excluded URL matches an exclude pattern
+     * @param bool $canonicalForFilters "Use canonical for category filters"
+     * @param bool $canonicalForPagination "Use canonical for category pagination"
+     * @return bool
+     */
+    public static function isNoindex(
+        string $fullActionName,
+        array $params,
+        array $filterVars,
+        bool $excluded,
+        bool $canonicalForFilters,
+        bool $canonicalForPagination
+    ): bool {
+        if ($excluded) {
+            return true;
+        }
+        if ($fullActionName !== 'catalog_category_view') {
+            return false;
+        }
+
+        foreach ($filterVars as $var) {
+            if (isset($params[$var]) && $params[$var] !== '' && !$canonicalForFilters) {
+                return true;
+            }
+        }
+
+        $page = $params['p'] ?? 1;
+
+        return is_scalar($page) && (int)$page > 1 && !$canonicalForPagination;
+    }
+
+    /**
+     * Apply robots meta tag; never weakens a value that already says NOINDEX (e.g. NOINDEX,NOFOLLOW)
      *
      * @return void
      */
     public function applyRobotsTag(): void
     {
-        if ($this->shouldAddNoindex()) {
-            // Set NOINDEX, FOLLOW tag
-            $this->pageConfig->setRobots('NOINDEX,FOLLOW');
-            $this->registry->register('robots_tag', 'NOINDEX,FOLLOW', true);
+        if (!$this->shouldAddNoindex()) {
+            return;
         }
+
+        $current = (string)$this->pageConfig->getRobots();
+        if (stripos($current, 'noindex') !== false) {
+            return;
+        }
+
+        $this->pageConfig->setRobots(stripos($current, 'nofollow') !== false ? 'NOINDEX,NOFOLLOW' : 'NOINDEX,FOLLOW');
     }
 
     /**
-     * Check if we're on a category page with active filters
+     * Request vars of the category layer's filters: the core category filter ("cat") plus every filterable
+     * attribute (core Layer\Category\FilterableAttributeList, the same list the layer builds its filters from).
      *
-     * @return bool
+     * Read from config, not from the rendered layer state, so pages whose theme or display mode renders no
+     * layered navigation still count as filtered (VERIFY_U4 R4).
+     *
+     * @return string[]
      */
-    private function isFilteredCategoryPage(): bool
+    private function getFilterVars(): array
     {
-        if ($this->request->getFullActionName() !== 'catalog_category_view') {
-            return false;
+        if ($this->filterVars !== null) {
+            return $this->filterVars;
         }
-        
-        $params = $this->request->getParams();
-        
-        // Exclude standard parameters
-        $standardParams = ['id', 'p', 'q', '___store', '___from_store'];
-        
-        foreach ($params as $key => $value) {
-            if (!in_array($key, $standardParams) && strpos($key, 'SID') === false) {
-                return true;
-            }
+        $vars = ['cat'];
+        foreach ($this->filterableAttributes->getList() as $attribute) {
+            $vars[] = (string)$attribute->getAttributeCode();
         }
-        
-        return false;
-    }
 
-    /**
-     * Check if filtered category page should have NOINDEX
-     *
-     * @return bool
-     */
-    private function shouldNoindexFilteredCategoryPage(): bool
-    {
-        // Check configuration
-        return !$this->config->shouldUseCanonicalForCategoryFilters();
-    }
-
-    /**
-     * Check if we're on a paginated category page
-     *
-     * @return bool
-     */
-    private function isPaginatedCategoryPage(): bool
-    {
-        if ($this->request->getFullActionName() !== 'catalog_category_view') {
-            return false;
-        }
-        
-        $page = (int)$this->request->getParam('p');
-        
-        return $page > 1;
-    }
-
-    /**
-     * Check if paginated category page should have NOINDEX
-     *
-     * @return bool
-     */
-    private function shouldNoindexPaginatedCategoryPage(): bool
-    {
-        return !$this->config->shouldUseCanonicalForCategoryPagination();
+        return $this->filterVars = $vars;
     }
 }

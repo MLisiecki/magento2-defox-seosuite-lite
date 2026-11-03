@@ -31,7 +31,7 @@ class DeleteButton extends GenericButton implements ButtonProviderInterface
                     'Are you sure you want to delete this template?'
                 ) . '\', \'' . $this->getDeleteUrl() . '\', {"data": {}})',
                 'sort_order' => 20,
-                'aclResource' => 'Defox_SEOSuite::template',
+                'aclResource' => 'Defox_SEOSuite::template_delete',
             ];
         }
         

@@ -11,18 +11,22 @@ declare(strict_types=1);
 namespace Defox\SEOSuite\Model\StructuredData\Generator;
 
 use Defox\SEOSuite\Helper\Config;
-use Defox\SEOSuite\Model\Cache\CacheManager;
+use Defox\SEOSuite\Model\Text\Cleaner;
 use Defox\SEOSuite\Model\StructuredData\AbstractGenerator;
+use Defox\SEOSuite\Model\StructuredData\OrganizationDataProvider;
 use Defox\SEOSuite\Model\StructuredData\Mapper\AttributeMapperInterface;
 use Magento\Catalog\Api\Data\ProductInterface;
-use Magento\Catalog\Api\CategoryRepositoryInterface;
 use Magento\Catalog\Helper\Data as CatalogHelper;
 use Magento\Catalog\Helper\Image as ImageHelper;
 use Magento\Catalog\Model\Product as ProductModel;
-use Magento\Catalog\Model\Category;
+use Magento\Catalog\Model\ResourceModel\Category\CollectionFactory as CategoryCollectionFactory;
 use Magento\CatalogInventory\Api\StockRegistryInterface;
 use Magento\Framework\App\Config\ScopeConfigInterface;
+use Magento\Framework\Module\Manager as ModuleManager;
 use Magento\Framework\Pricing\PriceCurrencyInterface;
+use Magento\Framework\Stdlib\DateTime\TimezoneInterface;
+use Magento\Review\Model\AppendSummaryData;
+use Magento\Review\Model\Review as ReviewModel;
 use Magento\Review\Model\ReviewFactory;
 use Magento\Store\Model\StoreManagerInterface;
 use Psr\Log\LoggerInterface;
@@ -35,6 +39,13 @@ use Psr\Log\LoggerInterface;
  */
 class Product extends AbstractGenerator
 {
+    /**
+     * Keys a mapped (text) attribute can never fill validly; other keys a mapping may fill when the generator left them empty
+     */
+    private const RESERVED_KEYS = [
+        '@context', '@type', 'image', 'brand', 'offers', 'review', 'aggregateRating', 'additionalProperty',
+    ];
+
     /**
      * @var ImageHelper
      */
@@ -66,48 +77,74 @@ class Product extends AbstractGenerator
     private CatalogHelper $catalogHelper;
     
     /**
-     * @var CategoryRepositoryInterface
+     * @var CategoryCollectionFactory
      */
-    private CategoryRepositoryInterface $categoryRepository;
+    private CategoryCollectionFactory $categoryCollectionFactory;
+
+    /**
+     * @var AppendSummaryData
+     */
+    private AppendSummaryData $appendSummaryData;
+
+    /**
+     * @var ModuleManager
+     */
+    private ModuleManager $moduleManager;
+
+    /**
+     * @var TimezoneInterface
+     */
+    private TimezoneInterface $timezone;
     
     /**
      * Constructor
      *
      * @param Config $configHelper
-     * @param CacheManager $cacheManager
      * @param StoreManagerInterface $storeManager
      * @param LoggerInterface $logger
      * @param ScopeConfigInterface $scopeConfig
+     * @param Cleaner $textCleaner
+     * @param OrganizationDataProvider $organizationData
      * @param ImageHelper $imageHelper
      * @param StockRegistryInterface $stockRegistry
      * @param PriceCurrencyInterface $priceCurrency
      * @param ReviewFactory $reviewFactory
      * @param AttributeMapperInterface $attributeMapper
      * @param CatalogHelper $catalogHelper
-     * @param CategoryRepositoryInterface $categoryRepository
+     * @param CategoryCollectionFactory $categoryCollectionFactory
+     * @param ModuleManager $moduleManager
+     * @param AppendSummaryData $appendSummaryData
+     * @param TimezoneInterface $timezone
      */
     public function __construct(
         Config $configHelper,
-        CacheManager $cacheManager,
         StoreManagerInterface $storeManager,
         LoggerInterface $logger,
         ScopeConfigInterface $scopeConfig,
+        Cleaner $textCleaner,
+        OrganizationDataProvider $organizationData,
         ImageHelper $imageHelper,
         StockRegistryInterface $stockRegistry,
         PriceCurrencyInterface $priceCurrency,
         ReviewFactory $reviewFactory,
         AttributeMapperInterface $attributeMapper,
         CatalogHelper $catalogHelper,
-        CategoryRepositoryInterface $categoryRepository
+        CategoryCollectionFactory $categoryCollectionFactory,
+        ModuleManager $moduleManager,
+        AppendSummaryData $appendSummaryData,
+        TimezoneInterface $timezone
     ) {
-        parent::__construct($configHelper, $cacheManager, $storeManager, $logger, $scopeConfig);
+        parent::__construct($configHelper, $storeManager, $logger, $scopeConfig, $textCleaner, $organizationData);
         $this->imageHelper = $imageHelper;
         $this->stockRegistry = $stockRegistry;
         $this->priceCurrency = $priceCurrency;
         $this->reviewFactory = $reviewFactory;
         $this->attributeMapper = $attributeMapper;
         $this->catalogHelper = $catalogHelper;
-        $this->categoryRepository = $categoryRepository;
+        $this->categoryCollectionFactory = $categoryCollectionFactory;
+        $this->moduleManager = $moduleManager;
+        $this->appendSummaryData = $appendSummaryData;
+        $this->timezone = $timezone;
     }
     
     /**
@@ -122,17 +159,17 @@ class Product extends AbstractGenerator
         /** @var ProductModel $product */
         $product = $entity;
         
-        $this->logger->info('Starting structured data generation for product: ' . $product->getId());
-        
         $data = [
             '@type' => 'Product',
             'name' => $product->getName(),
-            'description' => $this->getProductDescription($product),
             'sku' => $product->getSku(),
             'url' => $this->cleanUrl($product->getProductUrl())
         ];
-        
-        $this->logger->info('Basic product data created: ' . json_encode($data));
+
+        $description = $this->getProductDescription($product);
+        if ($description !== '') {
+            $data['description'] = $description;
+        }
         
         // Add images
         $images = $this->getProductImages($product);
@@ -171,20 +208,18 @@ class Product extends AbstractGenerator
             $data = array_merge($data, $reviewData);
         }
         
-        // Add custom attributes based on mapping
-        $customAttributes = $this->getCustomAttributes($product);
-        $this->logger->info('Custom attributes: ' . json_encode($customAttributes));
-        if (!empty($customAttributes)) {
-            $data = array_merge($data, $customAttributes);
+        // Add custom attributes based on mapping: only fill keys the generator did not set (no overrides)
+        $custom = array_diff_key($this->getCustomAttributes($product), array_flip(self::RESERVED_KEYS));
+        if (array_intersect_key($data, array_flip(['gtin8', 'gtin13', 'gtin14']))) {
+            unset($custom['gtin8'], $custom['gtin13'], $custom['gtin14']); // one GTIN per product
         }
+        $data += $custom;
         
         // Add additional properties (weight, dimensions, etc.)
         $additionalProperties = $this->getAdditionalProperties($product);
         if (!empty($additionalProperties)) {
             $data['additionalProperty'] = $additionalProperties;
         }
-        
-        $this->logger->info('Final structured data: ' . json_encode($data));
         
         return $data;
     }
@@ -219,17 +254,6 @@ class Product extends AbstractGenerator
     public function isEnabled(?int $storeId = null): bool
     {
         return $this->configHelper->isStructuredDataProductEnabled($storeId);
-    }
-    
-    /**
-     * Get entity ID
-     *
-     * @param mixed $entity
-     * @return string|null
-     */
-    protected function getEntityId($entity): ?string
-    {
-        return $entity->getId() ? (string)$entity->getId() : null;
     }
     
     /**
@@ -278,7 +302,7 @@ class Product extends AbstractGenerator
                     $images[] = $imageUrl;
                 }
             } catch (\Exception $e) {
-                $this->logger->debug('Error getting product image: ' . $e->getMessage());
+                $this->logger->warning('Error getting product image: ' . $e->getMessage());
             }
         }
         
@@ -293,22 +317,20 @@ class Product extends AbstractGenerator
      */
     private function getProductBrand(ProductModel $product): ?string
     {
-        // Try mapped brand attribute first
+        // Mapped brand attribute -> manufacturer -> configured default brand; first non-empty string wins
         $brandAttribute = $this->configHelper->getStructuredDataBrandAttribute();
-        if ($brandAttribute && $product->getData($brandAttribute)) {
-            $brand = $product->getAttributeText($brandAttribute);
-            if (!$brand) {
-                $brand = $product->getData($brandAttribute);
+        $candidates = [
+            $brandAttribute ? $this->getAttributeValueText($product, $brandAttribute) : null,
+            $this->getAttributeValueText($product, 'manufacturer'),
+            $this->configHelper->getStructuredDataDefaultBrand(),
+        ];
+
+        foreach ($candidates as $brand) {
+            if (is_string($brand) && trim($brand) !== '') {
+                return trim($brand);
             }
-            return is_string($brand) ? $brand : null;
         }
-        
-        // Fallback to manufacturer
-        if ($product->getManufacturer()) {
-            $manufacturer = $product->getAttributeText('manufacturer');
-            return is_string($manufacturer) ? $manufacturer : null;
-        }
-        
+
         return null;
     }
     
@@ -321,12 +343,30 @@ class Product extends AbstractGenerator
     private function getProductModel(ProductModel $product): ?string
     {
         $modelAttribute = $this->configHelper->getStructuredDataModelAttribute();
-        if ($modelAttribute && $product->getData($modelAttribute)) {
-            $model = $product->getData($modelAttribute);
-            return is_string($model) ? $model : null;
+        return $modelAttribute ? $this->getAttributeValueText($product, $modelAttribute) : null;
+    }
+
+    /**
+     * Attribute value as non-empty text: option label for source (select/multiselect/boolean) attributes,
+     * raw scalar for text-like ones; null when empty, multi-valued or an option id without a label
+     *
+     * @param ProductModel $product
+     * @param string $attributeCode
+     * @return string|null
+     */
+    private function getAttributeValueText(ProductModel $product, string $attributeCode): ?string
+    {
+        $value = $product->getData($attributeCode);
+        if ($value === null || $value === '' || is_array($value)) {
+            return null;
         }
-        
-        return null;
+
+        $attribute = $product->getResource()->getAttribute($attributeCode);
+        if ($attribute && $attribute->usesSource()) {
+            $value = $product->getAttributeText($attributeCode); // false/array: never fall back to the raw id
+        }
+
+        return (is_scalar($value) || $value instanceof \Stringable) && trim((string)$value) !== '' ? trim((string)$value) : null;
     }
     
     /**
@@ -347,22 +387,18 @@ class Product extends AbstractGenerator
         ];
         
         foreach ($gtinMappings as $gtinType => $attribute) {
-            if ($attribute && $product->getData($attribute)) {
-                $value = $product->getData($attribute);
-                if (is_string($value) && $value !== '') {
-                    $identifiers[$gtinType] = $value;
-                    break; // Only use one GTIN type
-                }
+            $value = $attribute ? $this->getAttributeValueText($product, $attribute) : null;
+            if ($value !== null) {
+                $identifiers[$gtinType] = $value;
+                break; // Only use one GTIN type
             }
         }
         
         // MPN
         $mpnAttribute = $this->configHelper->getStructuredDataMpnAttribute();
-        if ($mpnAttribute && $product->getData($mpnAttribute)) {
-            $mpn = $product->getData($mpnAttribute);
-            if (is_string($mpn) && $mpn !== '') {
-                $identifiers['mpn'] = $mpn;
-            }
+        $mpn = $mpnAttribute ? $this->getAttributeValueText($product, $mpnAttribute) : null;
+        if ($mpn !== null) {
+            $identifiers['mpn'] = $mpn;
         }
         
         return $identifiers;
@@ -376,37 +412,165 @@ class Product extends AbstractGenerator
      */
     private function getProductOffers(ProductModel $product): array
     {
+        $typeId = $product->getTypeId();
+
+        if (in_array($typeId, ['configurable', 'grouped', 'bundle'])) {
+            return $this->getAggregateOffer($product);
+        }
+
+        return $this->getSimpleOffer($product);
+    }
+
+    /**
+     * Get simple Offer for simple/virtual/downloadable products
+     *
+     * @param ProductModel $product
+     * @return array
+     */
+    private function getSimpleOffer(ProductModel $product): array
+    {
         $offers = [
             '@type' => 'Offer',
             'url' => $this->cleanUrl($product->getProductUrl()),
             'priceCurrency' => $this->storeManager->getStore()->getCurrentCurrencyCode(),
             'availability' => $this->getProductAvailability($product),
-            'priceValidUntil' => $this->getPriceValidUntil()
+            'priceValidUntil' => $this->getPriceValidUntil($product)
         ];
-        
-        // Add price
+
         $price = $this->getProductPrice($product);
-        if ($price !== null) {
-            $offers['price'] = $this->formatPrice($price);
+        if ($price === null) {
+            return []; // price is required on Offer
         }
-        
-        // Add condition
+        $offers['price'] = $this->formatPrice($price);
+
         $condition = $this->getProductCondition($product);
         if ($condition) {
             $offers['itemCondition'] = $condition;
         }
-        
-        // Add seller (organization)
+
         $seller = $this->getSellerInfo();
         if ($seller) {
             $offers['seller'] = $seller;
         }
-        
+
+        $validFrom = $this->getSpecialPriceValidFrom($product);
+        if ($validFrom !== null) {
+            $offers['validFrom'] = $validFrom;
+        }
+
+        return $this->addMerchantPolicies($offers);
+    }
+
+    /**
+     * Add return policy and shipping details (when enabled and complete) to an Offer/AggregateOffer
+     *
+     * @param array $offers
+     * @return array
+     */
+    private function addMerchantPolicies(array $offers): array
+    {
+        $returnPolicy = $this->getReturnPolicy((string)$offers['priceCurrency']);
+        if ($returnPolicy !== null) {
+            $offers['hasMerchantReturnPolicy'] = $returnPolicy;
+        }
+
+        $shippingDetails = $this->getShippingDetails((string)$offers['priceCurrency']);
+        if ($shippingDetails !== null) {
+            $offers['shippingDetails'] = $shippingDetails;
+        }
+
         return $offers;
+    }
+
+    /**
+     * Get AggregateOffer for configurable/grouped/bundle products
+     *
+     * @param ProductModel $product
+     * @return array
+     */
+    private function getAggregateOffer(ProductModel $product): array
+    {
+        $prices = $this->getChildPrices($product);
+        if (empty($prices)) {
+            return []; // lowPrice is required on AggregateOffer
+        }
+
+        $offers = [
+            '@type' => 'AggregateOffer',
+            'url' => $this->cleanUrl($product->getProductUrl()),
+            'priceCurrency' => $this->storeManager->getStore()->getCurrentCurrencyCode(),
+            'availability' => $this->getProductAvailability($product),
+            'offerCount' => count($prices)
+        ];
+
+        $offers['lowPrice'] = $this->formatPrice(min($prices));
+        $offers['highPrice'] = $this->formatPrice(max($prices));
+
+        $condition = $this->getProductCondition($product);
+        if ($condition) {
+            $offers['itemCondition'] = $condition;
+        }
+
+        $seller = $this->getSellerInfo();
+        if ($seller) {
+            $offers['seller'] = $seller;
+        }
+
+        return $this->addMerchantPolicies($offers);
+    }
+
+    /**
+     * Get child product prices for composite products
+     *
+     * @param ProductModel $product
+     * @return float[]
+     */
+    private function getChildPrices(ProductModel $product): array
+    {
+        $prices = [];
+        $typeInstance = $product->getTypeInstance();
+
+        try {
+            if ($product->getTypeId() === 'configurable') {
+                $children = $typeInstance->getUsedProducts($product);
+            } elseif ($product->getTypeId() === 'grouped') {
+                $children = $typeInstance->getAssociatedProducts($product);
+            } else {
+                // Bundle - use price model
+                $priceModel = $product->getPriceModel();
+                // Bundle totals already apply tax per selection: only convert currency (no second tax pass)
+                $store = $this->storeManager->getStore();
+                $includeTax = (int)$this->scopeConfig->getValue(
+                    'tax/display/type',
+                    \Magento\Store\Model\ScopeInterface::SCOPE_STORE,
+                    $store->getId()
+                ) !== 1;
+                [$minPrice, $maxPrice] = $priceModel->getTotalPrices($product, null, $includeTax, false);
+                return array_filter([
+                    (float)$this->priceCurrency->convert((float)$minPrice, $store),
+                    (float)$this->priceCurrency->convert((float)$maxPrice, $store),
+                ]);
+            }
+
+            foreach ($children as $child) {
+                $childPrice = (float)$child->getFinalPrice();
+                if ($childPrice > 0) {
+                    $prices[] = $this->getPriceWithTax($product, $childPrice);
+                }
+            }
+        } catch (\Exception $e) {
+            $this->logger->warning('Error getting child prices: ' . $e->getMessage());
+            $fallbackPrice = $this->getProductPrice($product);
+            if ($fallbackPrice !== null) {
+                $prices[] = $fallbackPrice;
+            }
+        }
+
+        return $prices;
     }
     
     /**
-     * Get product price
+     * Get product price (respects store tax display setting)
      *
      * @param ProductModel $product
      * @return float|null
@@ -414,38 +578,51 @@ class Product extends AbstractGenerator
     private function getProductPrice(ProductModel $product): ?float
     {
         try {
-            // Get the final price without tax first
             $price = $product->getFinalPrice();
-            
+
             if ($price === null) {
                 return null;
             }
-            
-            // Use CatalogHelper to get price with tax (same as displayed to customer)
-            $priceWithTax = $this->catalogHelper->getTaxPrice(
-                $product,
-                $price,
-                true, // include tax
-                null, // shipping address
-                null, // billing address
-                null, // customer tax class
-                $this->storeManager->getStore(), // store
-                null, // price includes tax (auto-detect)
-                true  // round price
-            );
-            
-            return $priceWithTax ? (float)$priceWithTax : null;
+
+            return $this->getPriceWithTax($product, (float)$price);
         } catch (\Exception $e) {
-            $this->logger->debug('Error getting product price with tax: ' . $e->getMessage());
-            
-            // Fallback to simple final price
-            try {
-                $price = $product->getFinalPrice();
-                return $price !== null ? (float)$price : null;
-            } catch (\Exception $fallbackException) {
-                return null;
-            }
+            $this->logger->warning('Error getting product price: ' . $e->getMessage());
+            return null;
         }
+    }
+
+    /**
+     * Get price with or without tax based on store display setting
+     *
+     * @param ProductModel $product
+     * @param float $price
+     * @return float
+     */
+    private function getPriceWithTax(ProductModel $product, float $price): float
+    {
+        $taxDisplayType = (int)$this->scopeConfig->getValue(
+            'tax/display/type',
+            \Magento\Store\Model\ScopeInterface::SCOPE_STORE,
+            $this->storeManager->getStore()->getId()
+        );
+
+        // 1 = excluding tax, 2 = including tax, 3 = both (use including)
+        $includeTax = $taxDisplayType !== 1;
+
+        $result = $this->catalogHelper->getTaxPrice(
+            $product,
+            $price,
+            $includeTax,
+            null,
+            null,
+            null,
+            $this->storeManager->getStore(),
+            null,
+            true
+        );
+
+        // Final/tax prices are in base currency; publish them in the currency printed next to them (CR-11)
+        return (float)$this->priceCurrency->convert((float)$result, $this->storeManager->getStore());
     }
     
     /**
@@ -458,18 +635,14 @@ class Product extends AbstractGenerator
     {
         try {
             $stockItem = $this->stockRegistry->getStockItem($product->getId());
-            
+
             if ($stockItem->getIsInStock()) {
-                if ($stockItem->getQty() > 0) {
-                    return 'https://schema.org/InStock';
-                } else if ($stockItem->getBackorders() > 0) {
-                    return 'https://schema.org/BackOrder';
-                }
+                return 'https://schema.org/InStock';
             }
         } catch (\Exception $e) {
-            $this->logger->debug('Error getting stock status: ' . $e->getMessage());
+            $this->logger->warning('Error getting stock status: ' . $e->getMessage());
         }
-        
+
         return 'https://schema.org/OutOfStock';
     }
     
@@ -507,53 +680,233 @@ class Product extends AbstractGenerator
     /**
      * Get price valid until date
      *
+     * @param ProductModel $product
      * @return string
      */
-    private function getPriceValidUntil(): string
+    private function getPriceValidUntil(ProductModel $product): string
     {
-        // Set price validity to 1 year from now
-        $date = new \DateTime();
-        $date->add(new \DateInterval('P1Y'));
-        return $date->format(\DateTime::ATOM);
+        // Special price end date only while that special price exists and has not ended
+        $specialToDate = (string)$product->getSpecialToDate();
+        if ($specialToDate !== '' && (string)$product->getSpecialPrice() !== '') {
+            try {
+                $date = (new \DateTime($specialToDate))->format('Y-m-d');
+                if ($date >= $this->getStoreToday()->format('Y-m-d')) {
+                    return $date;
+                }
+            } catch (\Exception $e) {
+                // fall through to default
+            }
+        }
+
+        return $this->getStoreToday()->modify('+1 year')->format('Y-m-d');
+    }
+
+    /**
+     * Today in the current store's timezone (special price dates are store-local days, as in
+     * TimezoneInterface::isScopeDateInInterval())
+     *
+     * @return \DateTime
+     */
+    private function getStoreToday(): \DateTime
+    {
+        return $this->timezone->scopeDate($this->getStoreId());
+    }
+
+    /**
+     * Get special price start date, only while a special price period is currently active
+     *
+     * @param ProductModel $product
+     * @return string|null
+     */
+    private function getSpecialPriceValidFrom(ProductModel $product): ?string
+    {
+        $from = (string)$product->getSpecialFromDate();
+        if ($from === '' || (string)$product->getSpecialPrice() === '') {
+            return null;
+        }
+
+        try {
+            // Same clock and Y-m-d granularity as getPriceValidUntil()
+            $today = $this->getStoreToday()->format('Y-m-d');
+            $fromDay = (new \DateTime($from))->format('Y-m-d');
+            $to = (string)$product->getSpecialToDate();
+            if ($fromDay > $today || ($to !== '' && (new \DateTime($to))->format('Y-m-d') < $today)) {
+                return null;
+            }
+            return $fromDay;
+        } catch (\Exception $e) {
+            return null;
+        }
+    }
+
+    /**
+     * Get MerchantReturnPolicy node (Google merchant listings), null when disabled or incomplete
+     *
+     * @param string $currency Offer priceCurrency
+     * @return array|null
+     */
+    private function getReturnPolicy(string $currency): ?array
+    {
+        if (!$this->configHelper->getValue(Config::XML_PATH_RETURN_POLICY_ENABLED)) {
+            return null;
+        }
+
+        $countries = $this->getCountryCodes(Config::XML_PATH_RETURN_POLICY_COUNTRY);
+        $category = (string)$this->configHelper->getValue(Config::XML_PATH_RETURN_POLICY_CATEGORY);
+        $categories = ['MerchantReturnFiniteReturnWindow', 'MerchantReturnNotPermitted', 'MerchantReturnUnlimitedWindow'];
+        if ($countries === [] || !in_array($category, $categories, true)) {
+            return null;
+        }
+
+        $policy = [
+            '@type' => 'MerchantReturnPolicy',
+            'applicableCountry' => count($countries) === 1 ? $countries[0] : $countries,
+            'returnPolicyCategory' => 'https://schema.org/' . $category,
+        ];
+        if ($category === 'MerchantReturnNotPermitted') {
+            return $policy;
+        }
+
+        if ($category === 'MerchantReturnFiniteReturnWindow') {
+            $days = (int)$this->configHelper->getValue(Config::XML_PATH_RETURN_POLICY_DAYS);
+            if ($days <= 0) {
+                return null;
+            }
+            $policy['merchantReturnDays'] = $days;
+        }
+
+        $method = (string)$this->configHelper->getValue(Config::XML_PATH_RETURN_POLICY_METHOD);
+        if (in_array($method, ['ReturnByMail', 'ReturnInStore', 'ReturnAtKiosk'], true)) {
+            $policy['returnMethod'] = 'https://schema.org/' . $method;
+        }
+        $fees = (string)$this->configHelper->getValue(Config::XML_PATH_RETURN_POLICY_FEES);
+        if ($fees === 'ReturnShippingFees') {
+            // ReturnShippingFees requires returnShippingFeesAmount; without a valid amount the customer pays
+            $amount = trim((string)$this->configHelper->getValue(Config::XML_PATH_RETURN_POLICY_FEES_AMOUNT));
+            if ($currency !== '' && is_numeric($amount) && (float)$amount >= 0) {
+                $policy['returnShippingFeesAmount'] = [
+                    '@type' => 'MonetaryAmount',
+                    // Entered in base currency like catalog prices; published in the offer currency (CR-11)
+                    'value' => $this->formatPrice(
+                        (float)$this->priceCurrency->convert((float)$amount, $this->storeManager->getStore())
+                    ),
+                    'currency' => $currency,
+                ];
+            } else {
+                $fees = 'ReturnFeesCustomerResponsibility';
+            }
+        }
+        if (in_array($fees, ['FreeReturn', 'ReturnFeesCustomerResponsibility', 'ReturnShippingFees'], true)) {
+            $policy['returnFees'] = 'https://schema.org/' . $fees;
+        }
+
+        return $policy;
+    }
+
+    /**
+     * Get OfferShippingDetails node (Google merchant listings), null when disabled or incomplete
+     *
+     * @param string $currency Offer priceCurrency
+     * @return array|null
+     */
+    private function getShippingDetails(string $currency): ?array
+    {
+        if ($currency === '' || !$this->configHelper->getValue(Config::XML_PATH_SHIPPING_DETAILS_ENABLED)) {
+            return null;
+        }
+
+        $rate = trim((string)$this->configHelper->getValue(Config::XML_PATH_SHIPPING_RATE));
+        $countries = $this->getCountryCodes(Config::XML_PATH_SHIPPING_COUNTRY);
+        if (!is_numeric($rate) || (float)$rate < 0 || $countries === []) {
+            return null;
+        }
+
+        $destinations = array_map(
+            static fn (string $country): array => ['@type' => 'DefinedRegion', 'addressCountry' => $country],
+            $countries
+        );
+
+        $details = [
+            '@type' => 'OfferShippingDetails',
+            'shippingRate' => [
+                '@type' => 'MonetaryAmount',
+                // Entered in base currency like catalog prices; published in the offer currency (CR-11)
+                'value' => $this->formatPrice(
+                    (float)$this->priceCurrency->convert((float)$rate, $this->storeManager->getStore())
+                ),
+                'currency' => $currency,
+            ],
+            'shippingDestination' => count($destinations) === 1 ? $destinations[0] : $destinations,
+        ];
+
+        // deliveryTime is only recommended: added when all four day values are valid and min <= max
+        $days = array_map(
+            fn (string $path): string => trim((string)$this->configHelper->getValue($path)),
+            [
+                Config::XML_PATH_SHIPPING_HANDLING_MIN,
+                Config::XML_PATH_SHIPPING_HANDLING_MAX,
+                Config::XML_PATH_SHIPPING_TRANSIT_MIN,
+                Config::XML_PATH_SHIPPING_TRANSIT_MAX,
+            ]
+        );
+        if (count(array_filter($days, 'ctype_digit')) !== 4) {
+            return $details;
+        }
+        [$handlingMin, $handlingMax, $transitMin, $transitMax] = array_map('intval', $days);
+        if ($handlingMin > $handlingMax || $transitMin > $transitMax) {
+            return $details;
+        }
+
+        $details['deliveryTime'] = [
+            '@type' => 'ShippingDeliveryTime',
+            'handlingTime' => [
+                '@type' => 'QuantitativeValue',
+                'minValue' => $handlingMin,
+                'maxValue' => $handlingMax,
+                'unitCode' => 'DAY',
+            ],
+            'transitTime' => [
+                '@type' => 'QuantitativeValue',
+                'minValue' => $transitMin,
+                'maxValue' => $transitMax,
+                'unitCode' => 'DAY',
+            ],
+        ];
+
+        return $details;
+    }
+
+    /**
+     * Parse a comma-separated ISO 3166-1 alpha-2 country list from config; invalid entries are dropped
+     *
+     * @param string $path
+     * @return string[]
+     */
+    private function getCountryCodes(string $path): array
+    {
+        $codes = array_map(
+            static fn (string $code): string => strtoupper(trim($code)),
+            explode(',', (string)$this->configHelper->getValue($path))
+        );
+
+        return array_values(array_unique(array_filter(
+            $codes,
+            static fn (string $code): bool => preg_match('/^[A-Z]{2}$/', $code) === 1
+        )));
     }
     
     /**
-     * Get seller information
+     * Get seller information (the store's Organization)
      *
      * @return array|null
      */
     private function getSellerInfo(): ?array
     {
-        $organizationName = $this->configHelper->getStructuredDataOrganizationName();
-        if (!$organizationName) {
+        if (trim($this->configHelper->getStructuredDataOrganizationName()) === '') {
             return null;
         }
-        
-        $data = [
-            '@type' => $this->getOrganizationType(),
-            'name' => $organizationName,
-            'url' => $this->storeManager->getStore()->getBaseUrl()
-        ];
-        
-        // Add logo
-        $logo = $this->configHelper->getStructuredDataOrganizationLogo();
-        if ($logo) {
-            $data['logo'] = $this->getOrganizationLogoUrl($logo);
-        }
-        
-        // Add address
-        $address = $this->getOrganizationAddress();
-        if (!empty($address)) {
-            $data['address'] = $address;
-        }
-        
-        // Add contact points
-        $contactPoints = $this->getOrganizationContactPoints();
-        if (!empty($contactPoints)) {
-            $data['contactPoint'] = $contactPoints;
-        }
-        
-        return $data;
+
+        return $this->organizationData->getData();
     }
     
     /**
@@ -564,81 +917,93 @@ class Product extends AbstractGenerator
      */
     private function getProductReviews(ProductModel $product): array
     {
+        // Magento_Review is optional (composer suggest): no review data when it is disabled
+        if (!$this->moduleManager->isEnabled('Magento_Review')) {
+            return [];
+        }
+
         $data = [];
         
         try {
-            $reviewCollection = $this->reviewFactory->create()->getCollection()
-                ->addStoreFilter($this->storeManager->getStore()->getId())
-                ->addEntityFilter('product', $product->getId())
-                ->addStatusFilter(\Magento\Review\Model\Review::STATUS_APPROVED)
-                ->setDateOrder();
-            
-            if ($reviewCollection->getSize() > 0) {
-                // Get rating summary
-                $product->getRatingSummary();
-                $ratingSummary = $product->getRatingSummary();
-                
-                if ($ratingSummary && $ratingSummary->getCount() > 0) {
-                    $data['aggregateRating'] = [
-                        '@type' => 'AggregateRating',
-                        'ratingValue' => round($ratingSummary->getRatingSummary() / 20, 1), // Convert from 0-100 to 0-5
-                        'bestRating' => '5',
-                        'worstRating' => '1',
-                        'ratingCount' => $ratingSummary->getCount()
+            $storeId = (int)$this->storeManager->getStore()->getId();
+
+            // Summary is read explicitly as scalars (head renders before the body's ReviewRenderer, CR-10)
+            $this->appendSummaryData->execute($product, $storeId, ReviewModel::ENTITY_PRODUCT_CODE);
+            $reviewsCount = (int)$product->getData('reviews_count');
+            $ratingPercent = (float)$product->getData('rating_summary');
+
+            if ($reviewsCount <= 0) {
+                return [];
+            }
+
+            if ($ratingPercent > 0) {
+                $data['aggregateRating'] = [
+                    '@type' => 'AggregateRating',
+                    'ratingValue' => round($ratingPercent / 20, 1),
+                    'bestRating' => '5',
+                    'worstRating' => '1',
+                    'ratingCount' => $reviewsCount,
+                    'reviewCount' => $reviewsCount
+                ];
+            }
+
+            // Add individual reviews if enabled
+            if ($this->configHelper->isStructuredDataReviewsEnabled()) {
+                // Bounded: 5 newest approved reviews, votes loaded for those only (CR-27)
+                $reviewCollection = $this->reviewFactory->create()->getCollection()
+                    ->addStoreFilter($storeId)
+                    ->addEntityFilter(ReviewModel::ENTITY_PRODUCT_CODE, $product->getId())
+                    ->addStatusFilter(ReviewModel::STATUS_APPROVED)
+                    ->setDateOrder()
+                    ->setPageSize(5)
+                    ->setCurPage(1)
+                    ->addRateVotes();
+
+                $reviews = [];
+                foreach ($reviewCollection as $review) {
+                    $authorName = $this->cleanTextField($review->getNickname());
+                    if ($authorName === '') {
+                        continue;
+                    }
+                    $reviewData = [
+                        '@type' => 'Review',
+                        'author' => [
+                            '@type' => 'Person',
+                            'name' => $authorName
+                        ],
+                        'datePublished' => $this->formatDate((string)$review->getCreatedAt()),
                     ];
+                    $reviewBody = trim($this->cleanTextField($review->getDetail()));
+                    if ($reviewBody !== '') {
+                        $reviewData['reviewBody'] = $reviewBody;
+                    }
+
+                    $total = 0;
+                    $count = 0;
+                    foreach ($review->getRatingVotes() ?: [] as $vote) {
+                        $total += (int)$vote->getValue();
+                        $count++;
+                    }
+                    if ($count === 0) {
+                        continue; // reviewRating is required on Review
+                    }
+                    $reviewData['reviewRating'] = [
+                        '@type' => 'Rating',
+                        'ratingValue' => round($total / $count, 1),
+                        'bestRating' => '5',
+                        'worstRating' => '1'
+                    ];
+
+                    $reviews[] = $reviewData;
                 }
-                
-                // Add individual reviews if enabled
-                if ($this->configHelper->isStructuredDataReviewsEnabled()) {
-                    $reviews = [];
-                    $reviewLimit = 5; // Limit number of reviews to include
-                    $reviewCount = 0;
-                    
-                    foreach ($reviewCollection as $review) {
-                        if ($reviewCount >= $reviewLimit) {
-                            break;
-                        }
-                        
-                        $reviewData = [
-                            '@type' => 'Review',
-                            'author' => [
-                                '@type' => 'Person',
-                                'name' => $review->getNickname()
-                            ],
-                            'datePublished' => $this->formatDate($review->getCreatedAt()),
-                            'reviewBody' => $review->getDetail()
-                        ];
-                        
-                        // Add rating if available
-                        $ratings = $review->getRatingVotes();
-                        if ($ratings && count($ratings)) {
-                            $totalRating = 0;
-                            $ratingCount = 0;
-                            foreach ($ratings as $rating) {
-                                $totalRating += $rating->getValue();
-                                $ratingCount++;
-                            }
-                            if ($ratingCount > 0) {
-                                $reviewData['reviewRating'] = [
-                                    '@type' => 'Rating',
-                                    'ratingValue' => round($totalRating / $ratingCount / 20, 1), // Convert from 0-100 to 0-5
-                                    'bestRating' => '5',
-                                    'worstRating' => '1'
-                                ];
-                            }
-                        }
-                        
-                        $reviews[] = $reviewData;
-                        $reviewCount++;
-                    }
-                    
-                    if (!empty($reviews)) {
-                        $data['review'] = $reviews;
-                    }
+
+                if (!empty($reviews)) {
+                    $data['review'] = $reviews;
                 }
             }
-        } catch (\Exception $e) {
-            $this->logger->debug('Error getting product reviews: ' . $e->getMessage());
+        } catch (\Throwable $e) {
+            $this->logger->warning('Error getting product reviews: ' . $e->getMessage());
+            return [];
         }
         
         return $data;
@@ -707,11 +1072,27 @@ class Product extends AbstractGenerator
                 
             case 'keywords':
                 return $this->formatProductKeywords($value);
+
+            case 'weight':
+                // schema.org weight is a QuantitativeValue; product weight is in the store's weight unit
+                if (!is_numeric($value) || (float)$value <= 0) {
+                    return null;
+                }
+                return [
+                    '@type' => 'QuantitativeValue',
+                    'value' => (float)$value,
+                    'unitCode' => $this->getWeightUnit(),
+                ];
+
+            case 'width':
+            case 'height':
+            case 'depth':
+                return null; // ponytail: Magento has no dimension unit, a unitless QuantitativeValue is invalid
                 
             case 'manufacturer':
                 // Avoid duplicate manufacturer if we already have brand
                 $brand = $this->getProductBrand($product);
-                if ($brand && strtolower($brand) === strtolower((string)$value)) {
+                if ($brand && mb_strtolower($brand, 'UTF-8') === mb_strtolower((string)$value, 'UTF-8')) {
                     return null; // Skip if it's the same as brand
                 }
                 return $value;
@@ -725,9 +1106,9 @@ class Product extends AbstractGenerator
      * Format product categories for schema.org
      *
      * @param ProductModel $product
-     * @return array|null
+     * @return string|null
      */
-    private function formatProductCategories(ProductModel $product): ?array
+    private function formatProductCategories(ProductModel $product): ?string
     {
         try {
             // Get category IDs first
@@ -736,27 +1117,24 @@ class Product extends AbstractGenerator
                 return null;
             }
             
+            // One query for all assigned categories (CR-29)
+            $collection = $this->categoryCollectionFactory->create()
+                ->setStoreId($this->storeManager->getStore()->getId())
+                ->addIdFilter($categoryIds)
+                ->addNameToResult()
+                ->addIsActiveFilter();
+
             $categories = [];
-            
-            // Load categories by IDs
-            foreach ($categoryIds as $categoryId) {
-                try {
-                    /** @var \Magento\Catalog\Model\Category $category */
-                    $category = $this->categoryRepository->get($categoryId, $this->storeManager->getStore()->getId());
-                    
-                    if ($category && $category->getName() && $category->getIsActive()) {
-                        $categories[] = $category->getName();
-                    }
-                } catch (\Exception $e) {
-                    // Skip this category if it can't be loaded
-                    $this->logger->debug('Error loading category ' . $categoryId . ': ' . $e->getMessage());
-                    continue;
+            foreach ($collection as $category) {
+                if ($category->getName()) {
+                    $categories[] = $category->getName();
                 }
             }
             
-            return !empty($categories) ? $categories : null;
+            // Unordered set of assigned categories (Text, not array), so no " > " path
+            return !empty($categories) ? implode(', ', $categories) : null;
         } catch (\Exception $e) {
-            $this->logger->debug('Error getting product categories: ' . $e->getMessage());
+            $this->logger->warning('Error getting product categories: ' . $e->getMessage());
             return null;
         }
     }
@@ -774,17 +1152,13 @@ class Product extends AbstractGenerator
         }
         
         if (is_array($value)) {
-            $cleanKeywords = array_filter($value); // Remove empty values
-            return !empty($cleanKeywords) ? implode(', ', $cleanKeywords) : null;
+            $value = implode(',', array_filter($value, 'is_scalar'));
         }
         
         if (is_string($value)) {
-            // Split by common separators, clean up, and rejoin with commas
-            $keywords = preg_split('/[,;\s]+/', $value, -1, PREG_SPLIT_NO_EMPTY);
-            if (!empty($keywords)) {
-                $cleanKeywords = array_map('trim', $keywords);
-                return implode(', ', $cleanKeywords);
-            }
+            // Split on list separators only (multi-word keywords such as "Red Wine" stay intact)
+            $keywords = array_unique(array_filter(array_map('trim', preg_split('/[,;]/', $value)), 'strlen'));
+            return !empty($keywords) ? implode(', ', $keywords) : null;
         }
         
         return null;
@@ -806,13 +1180,18 @@ class Product extends AbstractGenerator
         // Add other mapped properties
         $propertyMappings = $this->configHelper->getStructuredDataPropertyMappings();
         foreach ($propertyMappings as $propertyName => $attribute) {
-            if ($product->getData($attribute)) {
-                $value = $product->getAttributeText($attribute);
-                if (!$value) {
-                    $value = $product->getData($attribute);
-                }
-                
-                if ($value !== null && $value !== '') {
+            if ($propertyName !== '' && $product->getData($attribute)) {
+                // Option attributes publish their label only (false for an unknown id: never the raw id)
+                $eavAttribute = $product->getResource()->getAttribute($attribute);
+                $value = $eavAttribute && $eavAttribute->usesSource()
+                    ? $product->getAttributeText($attribute)
+                    : $product->getData($attribute);
+                // Multiselect text is an array: publish as one Text value
+                $value = is_array($value)
+                    ? implode(', ', array_filter(array_map('strval', $value), 'strlen'))
+                    : trim((string)$value);
+
+                if ($value !== '') {
                     $properties[] = [
                         '@type' => 'PropertyValue',
                         'name' => $propertyName,
@@ -846,175 +1225,5 @@ class Product extends AbstractGenerator
         
         // Default to KGM (kilograms) for European stores
         return $unitMap[$unit] ?? 'KGM';
-    }
-    
-    /**
-     * Get organization type for seller info
-     *
-     * @return string
-     */
-    private function getOrganizationType(): string
-    {
-        $type = $this->configHelper->getStructuredDataOrganizationType();
-        
-        // Map to valid schema.org types
-        $validTypes = [
-            'Organization',
-            'Corporation',
-            'LocalBusiness',
-            'Store',
-            'OnlineStore',
-            'Restaurant',
-            'Hotel',
-            'ProfessionalService',
-            'MedicalBusiness',
-            'AutomotiveBusiness',
-            'FinancialService',
-            'FoodEstablishment',
-            'SportsActivityLocation'
-        ];
-        
-        return in_array($type, $validTypes) ? $type : 'Organization';
-    }
-    
-    /**
-     * Get organization logo URL for seller info
-     *
-     * @param string $logoPath
-     * @return string
-     */
-    private function getOrganizationLogoUrl(string $logoPath): string
-    {
-        if (filter_var($logoPath, FILTER_VALIDATE_URL)) {
-            return $logoPath;
-        }
-        
-        // Build full URL for relative path
-        $baseUrl = $this->storeManager->getStore()->getBaseUrl(\Magento\Framework\UrlInterface::URL_TYPE_MEDIA);
-        return $baseUrl . 'logo/' . ltrim($logoPath, '/');
-    }
-    
-    /**
-     * Get organization contact points for seller info
-     *
-     * @return array
-     */
-    private function getOrganizationContactPoints(): array
-    {
-        $contactPoints = [];
-        
-        // Customer service
-        $customerServicePhone = $this->configHelper->getStructuredDataOrganizationCustomerServicePhone();
-        $customerServiceEmail = $this->configHelper->getStructuredDataOrganizationCustomerServiceEmail();
-        
-        if ($customerServicePhone || $customerServiceEmail) {
-            $customerService = [
-                '@type' => 'ContactPoint',
-                'contactType' => 'customer service'
-            ];
-            
-            if ($customerServicePhone) {
-                $customerService['telephone'] = $customerServicePhone;
-            }
-            if ($customerServiceEmail) {
-                $customerService['email'] = $customerServiceEmail;
-            }
-            
-            // Add available languages
-            $languages = $this->configHelper->getStructuredDataOrganizationAvailableLanguages();
-            if (!empty($languages)) {
-                $customerService['availableLanguage'] = $languages;
-            }
-            
-            // Add area served
-            $areaServed = $this->configHelper->getStructuredDataOrganizationAreaServed();
-            if (!empty($areaServed)) {
-                $customerService['areaServed'] = $areaServed;
-            }
-            
-            $contactPoints[] = $customerService;
-        }
-        
-        // Technical support
-        $techSupportPhone = $this->configHelper->getStructuredDataOrganizationTechSupportPhone();
-        $techSupportEmail = $this->configHelper->getStructuredDataOrganizationTechSupportEmail();
-        
-        if ($techSupportPhone || $techSupportEmail) {
-            $techSupport = [
-                '@type' => 'ContactPoint',
-                'contactType' => 'technical support'
-            ];
-            
-            if ($techSupportPhone) {
-                $techSupport['telephone'] = $techSupportPhone;
-            }
-            if ($techSupportEmail) {
-                $techSupport['email'] = $techSupportEmail;
-            }
-            
-            $contactPoints[] = $techSupport;
-        }
-        
-        // Sales
-        $salesPhone = $this->configHelper->getStructuredDataOrganizationSalesPhone();
-        $salesEmail = $this->configHelper->getStructuredDataOrganizationSalesEmail();
-        
-        if ($salesPhone || $salesEmail) {
-            $sales = [
-                '@type' => 'ContactPoint',
-                'contactType' => 'sales'
-            ];
-            
-            if ($salesPhone) {
-                $sales['telephone'] = $salesPhone;
-            }
-            if ($salesEmail) {
-                $sales['email'] = $salesEmail;
-            }
-            
-            $contactPoints[] = $sales;
-        }
-        
-        return $contactPoints;
-    }
-    
-    /**
-     * Get organization address for seller info
-     *
-     * @return array
-     */
-    private function getOrganizationAddress(): array
-    {
-        $address = [];
-        
-        $streetAddress = $this->configHelper->getStructuredDataOrganizationStreetAddress();
-        $locality = $this->configHelper->getStructuredDataOrganizationLocality();
-        $region = $this->configHelper->getStructuredDataOrganizationRegion();
-        $postalCode = $this->configHelper->getStructuredDataOrganizationPostalCode();
-        $country = $this->configHelper->getStructuredDataOrganizationCountry();
-        
-        if ($streetAddress || $locality || $region || $postalCode || $country) {
-            $address = [
-                '@type' => 'PostalAddress'
-            ];
-            
-            if ($streetAddress) {
-                $address['streetAddress'] = $streetAddress;
-            }
-            if ($locality) {
-                $address['addressLocality'] = $locality;
-            }
-            if ($region) {
-                $address['addressRegion'] = $region;
-            }
-            if ($postalCode) {
-                $address['postalCode'] = $postalCode;
-            }
-            if ($country) {
-                $address['addressCountry'] = $country;
-            }
-        }
-        
-        return $address;
     }
 }

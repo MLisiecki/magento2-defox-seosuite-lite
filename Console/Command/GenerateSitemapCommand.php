@@ -56,7 +56,7 @@ class GenerateSitemapCommand extends Command
         SitemapGeneratorInterface $sitemapGenerator,
         StoreManagerInterface $storeManager,
         State $appState,
-        string $name = null
+        ?string $name = null
     ) {
         parent::__construct($name);
         $this->sitemapGenerator = $sitemapGenerator;
@@ -76,12 +76,6 @@ class GenerateSitemapCommand extends Command
                 's',
                 InputOption::VALUE_OPTIONAL,
                 'Store ID to generate sitemap for (omit for all stores)'
-            )
-            ->addOption(
-                'force',
-                'f',
-                InputOption::VALUE_NONE,
-                'Force regeneration even if sitemap exists'
             );
     }
 

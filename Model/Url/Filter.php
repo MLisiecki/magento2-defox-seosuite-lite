@@ -1,7 +1,7 @@
 <?php
 /**
  * @package     Defox_SEOSuite
- * @author      Marcin Lisiecki 
+ * @author      Marcin Lisiecki
  * @copyright   Copyright (c) 2025 deFox
  * @license     GNU General Public License v3.0
  */
@@ -12,277 +12,244 @@ namespace Defox\SEOSuite\Model\Url;
 
 use Defox\SEOSuite\Helper\Config;
 use Defox\SEOSuite\Model\Config\Source\FriendlyUrlPattern;
+use Magento\Catalog\Model\Product;
+use Magento\Eav\Model\Config as EavConfig;
+use Magento\Framework\App\Config\ScopeConfigInterface;
 use Magento\Framework\App\Request\Http;
+use Magento\Framework\Filter\TranslitUrl;
 use Magento\Framework\UrlInterface;
+use Magento\Store\Model\ScopeInterface;
 use Magento\Store\Model\StoreManagerInterface;
-use Psr\Log\LoggerInterface;
+use Magento\UrlRewrite\Model\UrlFinderInterface;
+use Magento\UrlRewrite\Service\V1\Data\UrlRewrite;
 
 /**
- * Class for processing friendly filter URLs
+ * Friendly layered-navigation URLs: `<category path>/<attr><sep><value>[/…]<category suffix>`.
+ *
+ * Single implementation of both directions so that every built URL parses back to the same filters.
  */
 class Filter
 {
-    /**
-     * @var Config
-     */
-    private Config $config;
+    /** Same as CategoryUrlPathGenerator::XML_PATH_CATEGORY_URL_SUFFIX / CategoryUrlRewriteGenerator::ENTITY_TYPE */
+    private const XML_PATH_CATEGORY_URL_SUFFIX = 'catalog/seo/category_url_suffix';
+    private const ENTITY_TYPE_CATEGORY = 'category';
+    private const MAX_QUERY_PAIRS = 30;
 
-    /**
-     * @var Http
-     */
-    private Http $request;
+    /** @var array<string, array<int|string, string>> "storeId/attribute code" => [option id => url key] */
+    private array $optionKeys = [];
 
-    /**
-     * @var UrlInterface
-     */
-    private UrlInterface $urlBuilder;
+    /** @var array<string, bool> */
+    private array $isCategoryPath = [];
 
-    /**
-     * @var StoreManagerInterface
-     */
-    private StoreManagerInterface $storeManager;
-
-    /**
-     * @var LoggerInterface
-     */
-    private LoggerInterface $logger;
-
-    /**
-     * @var array
-     */
-    private array $attributeMap = [];
-
-    /**
-     * @var array
-     */
-    private array $reverseAttributeMap = [];
-
-    /**
-     * @param Config $config
-     * @param Http $request
-     * @param UrlInterface $urlBuilder
-     * @param StoreManagerInterface $storeManager
-     * @param LoggerInterface $logger
-     */
     public function __construct(
-        Config $config,
-        Http $request,
-        UrlInterface $urlBuilder,
-        StoreManagerInterface $storeManager,
-        LoggerInterface $logger
+        private readonly Config $config,
+        private readonly Http $request,
+        private readonly StoreManagerInterface $storeManager,
+        private readonly ScopeConfigInterface $scopeConfig,
+        private readonly UrlFinderInterface $urlFinder,
+        private readonly EavConfig $eavConfig,
+        private readonly TranslitUrl $translitUrl
     ) {
-        $this->config = $config;
-        $this->request = $request;
-        $this->urlBuilder = $urlBuilder;
-        $this->storeManager = $storeManager;
-        $this->logger = $logger;
-        
-        $this->initAttributeMap();
     }
 
     /**
-     * Initialize attribute map
+     * Outbound: move attribute-option filters of a core layered-nav URL into the path.
      *
-     * @return void
+     * Acts only when the current request was routed through a category URL rewrite (alias set by the
+     * core url-rewrite router or by our FilterRouter). Every other query param stays in the query string.
      */
-    private function initAttributeMap(): void
+    public function toFriendlyUrl(string $url): string
     {
-        $this->attributeMap = $this->config->getAttributeUrlMap();
-        
-        // Create reverse map
-        foreach ($this->attributeMap as $attributeCode => $friendlyName) {
-            $this->reverseAttributeMap[$friendlyName] = $attributeCode;
+        $storeId = (int)$this->storeManager->getStore()->getId();
+        $alias = $this->request->getAlias(UrlInterface::REWRITE_REQUEST_PATH_ALIAS);
+        if (!is_string($alias) || $alias === '' || !$this->isActive($storeId)) {
+            return $url;
         }
+        $suffix = $this->getCategorySuffix($storeId);
+        [$path, $query] = array_pad(explode('?', $url, 2), 2, null);
+        if ($query === null
+            || !str_ends_with($path, '/' . $alias)
+            || ($suffix !== '' && !str_ends_with($alias, $suffix))
+            || !($this->isCategoryPath[$alias] ??= (bool)$this->findCategoryRewrites([$alias], $storeId))
+        ) {
+            return $url;
+        }
+
+        $glue = str_contains($query, '&amp;') ? '&amp;' : '&'; // getRemoveUrl() uses _escape
+        $pairs = explode($glue, $query);
+        // ponytail: bounds attribute lookups for junk query names (one per distinct name, memoized);
+        // a filterable-code whitelist loaded once is the upgrade path if real URLs ever need more
+        if (count($pairs) > self::MAX_QUERY_PAIRS) {
+            return $url;
+        }
+        $filters = [];
+        $rest = [];
+        foreach ($pairs as $pair) {
+            [$name, $value] = array_pad(explode('=', $pair, 2), 2, '');
+            $key = isset($filters[$name]) ? null : ($this->getOptionKeys($name, $storeId)[$value] ?? null);
+            if ($key === null) {
+                $rest[] = $pair;
+            } else {
+                $filters[$name] = $key;
+            }
+        }
+        if (!$filters) {
+            return $url;
+        }
+
+        ksort($filters); // one URL per filter set, regardless of click order
+        $sep = $this->config->getValueSeparator($storeId);
+        $segments = '';
+        foreach ($filters as $code => $key) {
+            $segments .= '/' . rawurlencode((string)$code) . $sep . rawurlencode($key);
+        }
+
+        return substr($path, 0, -strlen($alias)) . substr($alias, 0, strlen($alias) - strlen($suffix))
+            . $segments . $suffix . ($rest ? '?' . implode($glue, $rest) : '');
     }
 
     /**
-     * Process request path to extract filter parameters
+     * Inbound: resolve a path built by toFriendlyUrl().
      *
-     * @param string $requestPath
-     * @return array
+     * Returns null unless the path minus trailing filter segments is a category URL rewrite of the current
+     * store and every filter segment is `<filterable attribute code><sep><existing option key>`.
+     *
+     * @return array{request_path: string, target_path: string, filters: array<string, string>}|null
      */
-    public function processRequestPath(string $requestPath): array
+    public function match(string $pathInfo): ?array
     {
-        if (!$this->config->areFriendlyUrlsEnabled()) {
-            return [];
+        $storeId = (int)$this->storeManager->getStore()->getId();
+        if (!$this->isActive($storeId)) {
+            return null;
         }
-        
-        $urlPattern = $this->config->getFriendlyUrlPattern();
-        
-        if ($urlPattern === FriendlyUrlPattern::PATTERN_PATH) {
-            return $this->processPathBasedUrl($requestPath);
+        $requestPath = ltrim($pathInfo, '/');
+        $suffix = $this->getCategorySuffix($storeId);
+        if ($suffix !== '' && !str_ends_with($requestPath, $suffix)) {
+            return null;
         }
-        
-        return [];
+        $segments = explode('/', substr($requestPath, 0, strlen($requestPath) - strlen($suffix)));
+        $sep = $this->config->getValueSeparator($storeId);
+
+        // Walk trailing filter segments; each prefix that remains is a category candidate (longest first).
+        $filters = [];
+        $candidates = [];
+        for ($i = count($segments) - 1; $i > 0; $i--) {
+            [$code, $key] = array_pad(explode($sep, $segments[$i], 2), 2, null);
+            $optionId = $key === null || isset($filters[$code])
+                ? false
+                : array_search($key, $this->getOptionKeys($code, $storeId), true);
+            if ($optionId === false) {
+                break;
+            }
+            $filters[$code] = (string)$optionId;
+            $candidates[implode('/', array_slice($segments, 0, $i)) . $suffix] = $filters;
+        }
+        if (!$candidates
+            // a real rewrite (product, CMS, custom, category) for the full path always wins
+            || $this->urlFinder->findOneByData([
+                UrlRewrite::REQUEST_PATH => $requestPath,
+                UrlRewrite::STORE_ID => $storeId,
+            ])
+        ) {
+            return null;
+        }
+
+        $rewrites = $this->findCategoryRewrites(array_map('strval', array_keys($candidates)), $storeId);
+        foreach ($candidates as $categoryPath => $candidateFilters) {
+            $rewrite = $rewrites[(string)$categoryPath] ?? null;
+            if ($rewrite !== null) {
+                ksort($candidateFilters);
+                return [
+                    'request_path' => (string)$categoryPath,
+                    'target_path' => (string)$rewrite->getTargetPath(),
+                    'filters' => $candidateFilters,
+                ];
+            }
+        }
+        return null;
+    }
+
+    private function isActive(int $storeId): bool
+    {
+        return $this->config->isEnabled($storeId)
+            && $this->config->areFriendlyUrlsEnabled($storeId)
+            && $this->config->getFriendlyUrlPattern($storeId) === FriendlyUrlPattern::PATTERN_PATH;
+    }
+
+    private function getCategorySuffix(int $storeId): string
+    {
+        return (string)$this->scopeConfig->getValue(
+            self::XML_PATH_CATEGORY_URL_SUFFIX,
+            ScopeInterface::SCOPE_STORE,
+            $storeId
+        );
     }
 
     /**
-     * Process path-based URL
-     *
-     * @param string $requestPath
-     * @return array
+     * @param string[] $requestPaths
+     * @return array<string, UrlRewrite> keyed by request path
      */
-    private function processPathBasedUrl(string $requestPath): array
+    private function findCategoryRewrites(array $requestPaths, int $storeId): array
     {
-        $filterParams = [];
-        $pathParts = explode('/', trim($requestPath, '/'));
-        
-        // Skip the first part (category path)
-        if (count($pathParts) <= 1) {
-            return [];
+        $result = [];
+        foreach ($this->urlFinder->findAllByData([
+            UrlRewrite::REQUEST_PATH => $requestPaths,
+            UrlRewrite::STORE_ID => $storeId,
+            UrlRewrite::ENTITY_TYPE => self::ENTITY_TYPE_CATEGORY,
+            UrlRewrite::REDIRECT_TYPE => 0,
+        ]) as $rewrite) {
+            $result[(string)$rewrite->getRequestPath()] = $rewrite;
         }
-        
-        $filterParts = array_slice($pathParts, 1);
-        $valueSeparator = $this->config->getValueSeparator();
-        $multiValueSeparator = $this->config->getMultiValueSeparator();
-        
-        foreach ($filterParts as $filterPart) {
-            // Skip empty parts
-            if (empty($filterPart)) {
-                continue;
-            }
-            
-            // Split by value separator
-            $parts = explode($valueSeparator, $filterPart);
-            
-            // Need at least attribute and one value
-            if (count($parts) < 2) {
-                continue;
-            }
-            
-            $attributeName = array_shift($parts);
-            $values = implode($valueSeparator, $parts);
-            
-            // Convert friendly name to attribute code if needed
-            $attributeCode = $this->getFriendlyAttributeCode($attributeName);
-            
-            // Process values (may have multiple values separated by multi-value separator)
-            $valueArray = explode($multiValueSeparator, $values);
-            
-            // Add to filter params
-            $filterParams[$attributeCode] = count($valueArray) > 1 ? $valueArray : $values;
-        }
-        
-        return $filterParams;
+        return $result;
     }
 
     /**
-     * Convert friendly URL to standard URL
+     * URL keys of a filterable (category layer) option attribute; empty for anything else.
      *
-     * @param string $friendlyUrl
-     * @return string
-     */
-    public function convertToStandardUrl(string $friendlyUrl): string
-    {
-        if (!$this->config->areFriendlyUrlsEnabled()) {
-            return $friendlyUrl;
-        }
-        
-        $urlPattern = $this->config->getFriendlyUrlPattern();
-        
-        if ($urlPattern === FriendlyUrlPattern::PATTERN_PATH) {
-            // Process the friendly URL to extract parameters
-            $params = $this->processRequestPath($friendlyUrl);
-            
-            // Extract the base URL (category path)
-            $pathParts = explode('/', trim($friendlyUrl, '/'));
-            $basePath = '/' . $pathParts[0];
-            
-            // Build query parameters
-            $queryParams = [];
-            foreach ($params as $code => $value) {
-                $queryParams[$code] = $value;
-            }
-            
-            // Build standard URL
-            $standardUrl = $basePath;
-            if (!empty($queryParams)) {
-                $standardUrl .= '?' . http_build_query($queryParams);
-            }
-            
-            return $standardUrl;
-        }
-        
-        return $friendlyUrl;
-    }
-
-    /**
-     * Convert standard URL to friendly URL
+     * "Filterable" is exactly the core category layer list (Layer\Category\FilterableAttributeList: every
+     * is_filterable attribute of the store, not per category), so a segment the layer would not apply cannot
+     * resolve here. Pages that render no layer at all get NOINDEX (RobotsHandler) or the clean canonical.
      *
-     * @param string $standardUrl
-     * @return string
+     * Key = slug of the store label (core url-key transliteration); empty or colliding slugs, and slugs
+     * equal to another option's id-key, fall back to the option id, so keys are unique per attribute.
+     *
+     * @return array<int|string, string> option id => key
      */
-    public function convertToFriendlyUrl(string $standardUrl): string
+    private function getOptionKeys(string $code, int $storeId): array
     {
-        if (!$this->config->areFriendlyUrlsEnabled()) {
-            return $standardUrl;
+        $memoKey = $storeId . '/' . $code;
+        if (isset($this->optionKeys[$memoKey])) {
+            return $this->optionKeys[$memoKey];
         }
-        
-        $urlPattern = $this->config->getFriendlyUrlPattern();
-        
-        if ($urlPattern === FriendlyUrlPattern::PATTERN_PATH) {
-            // Parse URL
-            $urlParts = parse_url($standardUrl);
-            $basePath = $urlParts['path'] ?? '/';
-            
-            // Parse query parameters
-            $params = [];
-            if (isset($urlParts['query'])) {
-                parse_str($urlParts['query'], $params);
-            }
-            
-            // Build friendly URL
-            $friendlyUrl = $basePath;
-            
-            if (!empty($params)) {
-                $valueSeparator = $this->config->getValueSeparator();
-                $multiValueSeparator = $this->config->getMultiValueSeparator();
-                $filterSeparator = $this->config->getFilterSeparator();
-                
-                foreach ($params as $code => $value) {
-                    // Skip non-filter parameters
-                    if (in_array($code, ['p', 'order', 'limit', 'mode'])) {
-                        continue;
-                    }
-                    
-                    // Get friendly attribute name
-                    $friendlyName = $this->getFriendlyAttributeName($code);
-                    
-                    // Handle multiple values
-                    if (is_array($value)) {
-                        $value = implode($multiValueSeparator, $value);
-                    }
-                    
-                    // Add to friendly URL
-                    $friendlyUrl .= $filterSeparator . $friendlyName . $valueSeparator . $value;
+        $keys = [];
+        $attribute = preg_match('/^[a-zA-Z][a-zA-Z0-9_]*$/', $code)
+            ? $this->eavConfig->getAttribute(Product::ENTITY, $code)
+            : null;
+        if ($attribute
+            && $attribute->getId()
+            && $attribute->getAttributeCode() === $code
+            && (int)$attribute->getIsFilterable() > 0
+            && $attribute->usesSource()
+        ) {
+            // Table source reads labels for the attribute's store (falls back to the current store when unset)
+            $attribute->setStoreId($storeId);
+            foreach ($attribute->getSource()->getAllOptions(false) as $option) {
+                $value = $option['value'] ?? '';
+                if (is_scalar($value) && (string)$value !== '') {
+                    $keys[(string)$value] = (string)$this->translitUrl->filter((string)($option['label'] ?? ''));
                 }
             }
-            
-            return $friendlyUrl;
+            do {
+                $changed = false;
+                $counts = array_count_values($keys);
+                foreach ($keys as $id => $key) {
+                    if ($key !== (string)$id && ($key === '' || $counts[$key] > 1)) {
+                        $keys[$id] = (string)$id;
+                        $changed = true;
+                    }
+                }
+            } while ($changed);
         }
-        
-        return $standardUrl;
-    }
-
-    /**
-     * Get friendly attribute name for the given attribute code
-     *
-     * @param string $attributeCode
-     * @return string
-     */
-    private function getFriendlyAttributeName(string $attributeCode): string
-    {
-        return $this->attributeMap[$attributeCode] ?? $attributeCode;
-    }
-
-    /**
-     * Get attribute code from friendly name
-     *
-     * @param string $friendlyName
-     * @return string
-     */
-    private function getFriendlyAttributeCode(string $friendlyName): string
-    {
-        return $this->reverseAttributeMap[$friendlyName] ?? $friendlyName;
+        return $this->optionKeys[$memoKey] = $keys;
     }
 }

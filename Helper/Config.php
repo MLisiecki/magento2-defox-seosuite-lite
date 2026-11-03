@@ -16,7 +16,12 @@ use Defox\SEOSuite\Model\Config\Source\PaginationCanonicalType;
 use Magento\Framework\App\Helper\AbstractHelper;
 use Magento\Framework\App\Helper\Context;
 use Magento\Framework\App\Filesystem\DirectoryList;
+use Magento\Framework\Exception\LocalizedException;
+use Magento\Framework\UrlInterface;
+use Magento\MediaStorage\Model\File\Validator\AvailablePath;
+use Magento\Sitemap\Model\SitemapConfigReaderInterface;
 use Magento\Store\Model\ScopeInterface;
+use Magento\Store\Model\StoreManagerInterface;
 
 /**
  * Config helper class for SEO Suite
@@ -29,17 +34,41 @@ class Config extends AbstractHelper
     private DirectoryList $directoryList;
 
     /**
+     * @var StoreManagerInterface
+     */
+    private StoreManagerInterface $storeManager;
+
+    /**
+     * @var AvailablePath
+     */
+    private AvailablePath $pathValidator;
+
+    /**
+     * @var SitemapConfigReaderInterface
+     */
+    private SitemapConfigReaderInterface $sitemapConfigReader;
+
+    /**
      * Constructor
      *
      * @param Context $context
      * @param DirectoryList $directoryList
+     * @param StoreManagerInterface $storeManager
+     * @param AvailablePath $pathValidator
+     * @param SitemapConfigReaderInterface $sitemapConfigReader
      */
     public function __construct(
         Context $context,
-        DirectoryList $directoryList
+        DirectoryList $directoryList,
+        StoreManagerInterface $storeManager,
+        AvailablePath $pathValidator,
+        SitemapConfigReaderInterface $sitemapConfigReader
     ) {
         parent::__construct($context);
         $this->directoryList = $directoryList;
+        $this->storeManager = $storeManager;
+        $this->pathValidator = $pathValidator;
+        $this->sitemapConfigReader = $sitemapConfigReader;
     }
     /**
      * Module enable/disable config path
@@ -70,16 +99,11 @@ class Config extends AbstractHelper
     public const XML_PATH_EXCLUDE_ANCHOR_CATEGORIES = 'defox_seosuite/canonical/exclude_anchor_categories';
     public const XML_PATH_EXCLUDED_PRODUCT_TYPES = 'defox_seosuite/canonical/excluded_product_types';
     public const XML_PATH_EXCLUDED_CMS_PAGES = 'defox_seosuite/canonical/excluded_cms_pages';
-    public const XML_PATH_CANONICAL_CACHE_ENABLED = 'defox_seosuite/canonical/cache_enabled';
-    public const XML_PATH_CANONICAL_CACHE_LIFETIME = 'defox_seosuite/canonical/cache_lifetime';
 
-    public const XML_PATH_FRIENDLY_URLS_ENABLED = 'defox_seosuite/friendly_urls/enabled';
+    // ponytail: renamed from friendly_urls/enabled so stale pre-U6 rows (saved =1 while the feature was inert) don't switch it on
+    public const XML_PATH_FRIENDLY_URLS_ENABLED = 'defox_seosuite/friendly_urls/active';
     public const XML_PATH_FRIENDLY_URL_PATTERN = 'defox_seosuite/friendly_urls/url_pattern';
-    public const XML_PATH_FILTER_SEPARATOR = 'defox_seosuite/friendly_urls/filter_separator';
     public const XML_PATH_VALUE_SEPARATOR = 'defox_seosuite/friendly_urls/value_separator';
-    public const XML_PATH_MULTIVALUE_SEPARATOR = 'defox_seosuite/friendly_urls/multivalue_separator';
-    public const XML_PATH_ATTRIBUTE_URL_MAP = 'defox_seosuite/friendly_urls/attribute_url_map';
-    public const XML_PATH_SKIP_PREFIXES = 'defox_seosuite/friendly_urls/skip_prefixes';
 
     // Structured Data paths
     public const XML_PATH_STRUCTURED_DATA_ENABLED = 'defox_seosuite/structured_data/enabled';
@@ -88,8 +112,6 @@ class Config extends AbstractHelper
     public const XML_PATH_STRUCTURED_DATA_ORGANIZATION_ENABLED = 'defox_seosuite/structured_data/organization_enabled';
     public const XML_PATH_STRUCTURED_DATA_WEBSITE_ENABLED = 'defox_seosuite/structured_data/website_enabled';
     public const XML_PATH_STRUCTURED_DATA_REVIEWS_ENABLED = 'defox_seosuite/structured_data/reviews_enabled';
-    public const XML_PATH_STRUCTURED_DATA_CACHE_ENABLED = 'defox_seosuite/structured_data/cache_enabled';
-    public const XML_PATH_STRUCTURED_DATA_CACHE_LIFETIME = 'defox_seosuite/structured_data/cache_lifetime';
     public const XML_PATH_STRUCTURED_DATA_CATEGORY_PRODUCT_LIST_ENABLED = 'defox_seosuite/structured_data/category_product_list_enabled';
     public const XML_PATH_STRUCTURED_DATA_CATEGORY_PRODUCT_LIMIT = 'defox_seosuite/structured_data/category_product_limit';
 
@@ -130,8 +152,6 @@ class Config extends AbstractHelper
 
     // Website data paths
     public const XML_PATH_STRUCTURED_DATA_WEBSITE_ALTERNATE_NAME = 'defox_seosuite/structured_data_website/alternate_name';
-    public const XML_PATH_SITELINKS_SEARCHBOX_ENABLED = 'defox_seosuite/structured_data_website/sitelinks_searchbox_enabled';
-    public const XML_PATH_SITELINKS_SEARCHBOX_URL = 'defox_seosuite/structured_data_website/sitelinks_searchbox_url';
 
     // Product attribute mappings
     public const XML_PATH_STRUCTURED_DATA_BRAND_ATTRIBUTE = 'defox_seosuite/structured_data_product/brand_attribute';
@@ -144,18 +164,30 @@ class Config extends AbstractHelper
     public const XML_PATH_STRUCTURED_DATA_CONDITION_ATTRIBUTE = 'defox_seosuite/structured_data_product/condition_attribute';
     public const XML_PATH_STRUCTURED_DATA_PROPERTY_MAPPINGS = 'defox_seosuite/structured_data_product/property_mappings';
     public const XML_PATH_STRUCTURED_DATA_ATTRIBUTE_MAPPINGS = 'defox_seosuite/structured_data_product/attribute_mappings';
+    public const XML_PATH_STRUCTURED_DATA_DEFAULT_BRAND = 'defox_seosuite/structured_data_product/default_brand';
 
-    // General cache configuration paths
-    public const XML_PATH_CACHE_ENABLED = 'defox_seosuite/cache/enabled';
-    public const XML_PATH_CACHE_BACKEND = 'defox_seosuite/cache/backend';
-    public const XML_PATH_CACHE_LIFETIME = 'defox_seosuite/cache/lifetime';
+    // Offer return policy / shipping details (Google merchant listings)
+    public const XML_PATH_RETURN_POLICY_ENABLED = 'defox_seosuite/structured_data_return_policy/enabled';
+    public const XML_PATH_RETURN_POLICY_COUNTRY = 'defox_seosuite/structured_data_return_policy/applicable_country';
+    public const XML_PATH_RETURN_POLICY_CATEGORY = 'defox_seosuite/structured_data_return_policy/category';
+    public const XML_PATH_RETURN_POLICY_DAYS = 'defox_seosuite/structured_data_return_policy/days';
+    public const XML_PATH_RETURN_POLICY_METHOD = 'defox_seosuite/structured_data_return_policy/method';
+    public const XML_PATH_RETURN_POLICY_FEES = 'defox_seosuite/structured_data_return_policy/fees';
+    public const XML_PATH_RETURN_POLICY_FEES_AMOUNT = 'defox_seosuite/structured_data_return_policy/fees_amount';
+    public const XML_PATH_SHIPPING_DETAILS_ENABLED = 'defox_seosuite/structured_data_shipping/enabled';
+    public const XML_PATH_SHIPPING_RATE = 'defox_seosuite/structured_data_shipping/rate';
+    public const XML_PATH_SHIPPING_COUNTRY = 'defox_seosuite/structured_data_shipping/destination_country';
+    public const XML_PATH_SHIPPING_HANDLING_MIN = 'defox_seosuite/structured_data_shipping/handling_min_days';
+    public const XML_PATH_SHIPPING_HANDLING_MAX = 'defox_seosuite/structured_data_shipping/handling_max_days';
+    public const XML_PATH_SHIPPING_TRANSIT_MIN = 'defox_seosuite/structured_data_shipping/transit_min_days';
+    public const XML_PATH_SHIPPING_TRANSIT_MAX = 'defox_seosuite/structured_data_shipping/transit_max_days';
 
     // Sitemap configuration paths
     public const XML_PATH_SITEMAP_ENABLED = 'defox_seosuite/sitemap/enabled';
     public const XML_PATH_SITEMAP_PATH = 'defox_seosuite/sitemap/path';
+    public const DEFAULT_SITEMAP_PATH = 'media/maps/';
     public const XML_PATH_SITEMAP_ENABLE_COMPRESSION = 'defox_seosuite/sitemap/enable_compression';
     public const XML_PATH_SITEMAP_GENERATION_CRON_EXPR = 'defox_seosuite/sitemap/generation_cron_expr';
-    public const XML_PATH_SITEMAP_PING_SEARCH_ENGINES = 'defox_seosuite/sitemap/ping_search_engines';
     public const XML_PATH_SITEMAP_ENABLE_HREFLANG = 'defox_seosuite/sitemap/enable_hreflang';
     public const XML_PATH_SITEMAP_PRODUCT_INCLUDE_IMAGES = 'defox_seosuite/sitemap/product/include_images';
 
@@ -163,13 +195,7 @@ class Config extends AbstractHelper
     /**
      * Default values
      */
-    public const DEFAULT_CANONICAL_CACHE_LIFETIME = 86400; // 24 hours
-
-    public const DEFAULT_STRUCTURED_DATA_CACHE_LIFETIME = 86400; // 24 hours
-    public const DEFAULT_CACHE_LIFETIME = 86400; // 24 hours
-    public const DEFAULT_FILTER_SEPARATOR = '/';
     public const DEFAULT_VALUE_SEPARATOR = '-';
-    public const DEFAULT_MULTIVALUE_SEPARATOR = ',';
 
 
     /**
@@ -397,38 +423,6 @@ class Config extends AbstractHelper
             ScopeInterface::SCOPE_STORE,
             $storeId
         );
-    }
-
-    /**
-     * Check if structured data cache is enabled
-     *
-     * @param int|null $storeId
-     * @return bool
-     */
-    public function isStructuredDataCacheEnabled(?int $storeId = null): bool
-    {
-        return $this->scopeConfig->isSetFlag(
-            self::XML_PATH_STRUCTURED_DATA_CACHE_ENABLED,
-            ScopeInterface::SCOPE_STORE,
-            $storeId
-        );
-    }
-
-    /**
-     * Get structured data cache lifetime
-     *
-     * @param int|null $storeId
-     * @return int
-     */
-    public function getStructuredDataCacheLifetime(?int $storeId = null): int
-    {
-        $lifetime = (int)$this->scopeConfig->getValue(
-            self::XML_PATH_STRUCTURED_DATA_CACHE_LIFETIME,
-            ScopeInterface::SCOPE_STORE,
-            $storeId
-        );
-
-        return $lifetime ?: self::DEFAULT_STRUCTURED_DATA_CACHE_LIFETIME;
     }
 
     /**
@@ -886,36 +880,6 @@ class Config extends AbstractHelper
     }
 
     /**
-     * Check if Sitelinks Searchbox is enabled
-     *
-     * @param int|null $storeId
-     * @return bool
-     */
-    public function isSitelinksSearchboxEnabled(?int $storeId = null): bool
-    {
-        return $this->scopeConfig->isSetFlag(
-            self::XML_PATH_SITELINKS_SEARCHBOX_ENABLED,
-            ScopeInterface::SCOPE_STORE,
-            $storeId
-        );
-    }
-
-    /**
-     * Get Sitelinks Searchbox URL pattern
-     *
-     * @param int|null $storeId
-     * @return string
-     */
-    public function getSitelinksSearchboxUrl(?int $storeId = null): string
-    {
-        return (string)$this->scopeConfig->getValue(
-            self::XML_PATH_SITELINKS_SEARCHBOX_URL,
-            ScopeInterface::SCOPE_STORE,
-            $storeId
-        );
-    }
-
-    /**
      * Get brand attribute for structured data
      *
      * @param int|null $storeId
@@ -928,6 +892,21 @@ class Config extends AbstractHelper
             ScopeInterface::SCOPE_STORE,
             $storeId
         );
+    }
+
+    /**
+     * Get default brand name used when the product has no brand/manufacturer value
+     *
+     * @param int|null $storeId
+     * @return string
+     */
+    public function getStructuredDataDefaultBrand(?int $storeId = null): string
+    {
+        return trim((string)$this->scopeConfig->getValue(
+            self::XML_PATH_STRUCTURED_DATA_DEFAULT_BRAND,
+            ScopeInterface::SCOPE_STORE,
+            $storeId
+        ));
     }
 
     /**
@@ -1269,38 +1248,6 @@ class Config extends AbstractHelper
         return explode(',', (string)$pages);
     }
 
-    /**
-     * Check if canonical cache is enabled
-     *
-     * @param int|null $storeId
-     * @return bool
-     */
-    public function isCanonicalCacheEnabled(?int $storeId = null): bool
-    {
-        return $this->scopeConfig->isSetFlag(
-            self::XML_PATH_CANONICAL_CACHE_ENABLED,
-            ScopeInterface::SCOPE_STORE,
-            $storeId
-        );
-    }
-
-    /**
-     * Get canonical cache lifetime
-     *
-     * @param int|null $storeId
-     * @return int
-     */
-    public function getCanonicalCacheLifetime(?int $storeId = null): int
-    {
-        $lifetime = (int)$this->scopeConfig->getValue(
-            self::XML_PATH_CANONICAL_CACHE_LIFETIME,
-            ScopeInterface::SCOPE_STORE,
-            $storeId
-        );
-        
-        return $lifetime ?: self::DEFAULT_CANONICAL_CACHE_LIFETIME;
-    }
-
 
 
     /**
@@ -1334,23 +1281,6 @@ class Config extends AbstractHelper
     }
 
     /**
-     * Get filter separator
-     *
-     * @param int|null $storeId
-     * @return string
-     */
-    public function getFilterSeparator(?int $storeId = null): string
-    {
-        $separator = $this->scopeConfig->getValue(
-            self::XML_PATH_FILTER_SEPARATOR,
-            ScopeInterface::SCOPE_STORE,
-            $storeId
-        );
-        
-        return $separator ? (string)$separator : self::DEFAULT_FILTER_SEPARATOR;
-    }
-
-    /**
      * Get value separator
      *
      * @param int|null $storeId
@@ -1364,173 +1294,8 @@ class Config extends AbstractHelper
             $storeId
         );
         
-        return $separator ? (string)$separator : self::DEFAULT_VALUE_SEPARATOR;
-    }
-
-    /**
-     * Get multi-value separator
-     *
-     * @param int|null $storeId
-     * @return string
-     */
-    public function getMultiValueSeparator(?int $storeId = null): string
-    {
-        $separator = $this->scopeConfig->getValue(
-            self::XML_PATH_MULTIVALUE_SEPARATOR,
-            ScopeInterface::SCOPE_STORE,
-            $storeId
-        );
-        
-        return $separator ? (string)$separator : self::DEFAULT_MULTIVALUE_SEPARATOR;
-    }
-
-    /**
-     * Get attribute URL map
-     *
-     * @param int|null $storeId
-     * @return array
-     */
-    public function getAttributeUrlMap(?int $storeId = null): array
-    {
-        $map = $this->scopeConfig->getValue(
-            self::XML_PATH_ATTRIBUTE_URL_MAP,
-            ScopeInterface::SCOPE_STORE,
-            $storeId
-        );
-        
-        if (empty($map)) {
-            return [];
-        }
-        
-        $result = [];
-        $lines = explode(PHP_EOL, (string)$map);
-        
-        foreach ($lines as $line) {
-            $parts = explode('=', trim($line));
-            if (count($parts) === 2) {
-                $result[trim($parts[0])] = trim($parts[1]);
-            }
-        }
-        
-        return $result;
-    }
-
-    /**
-     * Check if general cache is enabled
-     *
-     * @param int|null $storeId
-     * @return bool
-     */
-    public function isCacheEnabled(?int $storeId = null): bool
-    {
-        return $this->scopeConfig->isSetFlag(
-            self::XML_PATH_CACHE_ENABLED,
-            ScopeInterface::SCOPE_STORE,
-            $storeId
-        );
-    }
-
-    /**
-     * Get cache backend type
-     *
-     * @param int|null $storeId
-     * @return string
-     */
-    public function getCacheBackend(?int $storeId = null): string
-    {
-        return (string)$this->scopeConfig->getValue(
-            self::XML_PATH_CACHE_BACKEND,
-            ScopeInterface::SCOPE_STORE,
-            $storeId
-        ) ?: 'file'; // Default to file cache
-    }
-
-    /**
-     * Get general cache lifetime
-     *
-     * @param int|null $storeId
-     * @return int
-     */
-    public function getCacheLifetime(?int $storeId = null): int
-    {
-        $lifetime = (int)$this->scopeConfig->getValue(
-            self::XML_PATH_CACHE_LIFETIME,
-            ScopeInterface::SCOPE_STORE,
-            $storeId
-        );
-        
-        return $lifetime ?: self::DEFAULT_CACHE_LIFETIME;
-    }
-
-    /**
-     * Get skip prefixes for friendly URLs
-     *
-     * @param int|null $storeId
-     * @return array
-     */
-    public function getSkipPrefixes(?int $storeId = null): array
-    {
-        $skipPrefixes = $this->scopeConfig->getValue(
-            self::XML_PATH_SKIP_PREFIXES,
-            ScopeInterface::SCOPE_STORE,
-            $storeId
-        );
-        
-        if (empty($skipPrefixes)) {
-            return $this->getDefaultSkipPrefixes();
-        }
-        
-        // Parse textarea input (one per line)
-        $lines = array_filter(array_map('trim', explode(PHP_EOL, (string)$skipPrefixes)));
-        
-        // Merge with default prefixes to ensure core functionality
-        $defaultPrefixes = $this->getDefaultSkipPrefixes();
-        $configuredPrefixes = array_filter($lines, function($prefix) {
-            return !empty($prefix) && $this->validatePrefix($prefix);
-        });
-        
-        return array_unique(array_merge($defaultPrefixes, $configuredPrefixes));
-    }
-    
-    /**
-     * Get default skip prefixes that should always be ignored
-     *
-     * @return array
-     */
-    public function getDefaultSkipPrefixes(): array
-    {
-        return [
-            'blog',          // Magefan Blog module
-            'admin',         // Admin routes
-            'rest',          // REST API
-            'soap',          // SOAP API
-            'graphql',       // GraphQL API
-            'pub',           // Static files
-            'media',         // Media files
-            'static',        // Static resources
-            'customer',      // Customer routes that might have dashes
-            'checkout',      // Checkout routes
-            'sales',         // Sales routes
-            'paypal',        // PayPal routes
-            'newsletter',    // Newsletter routes
-            'catalogsearch', // Catalog search
-            'sendfriend',    // Send friend routes
-            'wishlist',      // Wishlist routes
-            'review',        // Review routes
-            'contact',       // Contact routes
-        ];
-    }
-    
-    /**
-     * Validate prefix format
-     *
-     * @param string $prefix
-     * @return bool
-     */
-    private function validatePrefix(string $prefix): bool
-    {
-        // Basic validation - alphanumeric with dashes/underscores
-        return (bool)preg_match('/^[a-zA-Z0-9_-]+$/', $prefix);
+        // Must not occur in attribute codes ([A-Za-z0-9_]) and must be path-safe, otherwise segments cannot be parsed back.
+        return in_array($separator, ['-', '~'], true) ? $separator : self::DEFAULT_VALUE_SEPARATOR;
     }
 
     /**
@@ -1569,50 +1334,156 @@ class Config extends AbstractHelper
         );
     }
 
-
-
     /**
-     * Get sitemap path
+     * Store locale code (general/locale/code), e.g. "en_GB"
      *
-     * @param int|null $storeId
+     * @param int $storeId
      * @return string
      */
-    public function getSitemapPath(?int $storeId = null): string
+    public function getLocaleCode(int $storeId): string
     {
-        $path = $this->scopeConfig->getValue(
-            self::XML_PATH_SITEMAP_PATH,
-            ScopeInterface::SCOPE_STORE,
-            $storeId
-        );
-        
-        // Fallback do domyślnej wartości jeśli ścieżka nie jest skonfigurowana
-        return $path ? rtrim((string)$path, '/') . '/' : 'media/maps';
+        return (string)$this->scopeConfig->getValue('general/locale/code', ScopeInterface::SCOPE_STORE, $storeId);
     }
 
     /**
-     * Get full sitemap directory path
+     * Identifier of a core utility CMS page for a store, without the "|<page id>" suffix core stores
+     * when the identifier repeats across stores
      *
-     * @param int|null $storeId
+     * @param string $page cms_home_page | cms_no_route | cms_no_cookies (under web/default/)
+     * @param int $storeId
      * @return string
      */
-    public function getFullSitemapPath(?int $storeId = null): string
+    public function getCmsUtilityPageIdentifier(string $page, int $storeId): string
     {
-        $sitemapPath = $this->getSitemapPath($storeId);
-        
-        // Sprawdzenie czy ścieżka jest absolutna
-        if (str_starts_with($sitemapPath, '/')) {
-            return $sitemapPath;
+        $value = (string)$this->scopeConfig->getValue('web/default/' . $page, ScopeInterface::SCOPE_STORE, $storeId);
+        return explode('|', $value, 2)[0];
+    }
+
+
+
+    /**
+     * Normalise a sitemap directory to "dir/sub/" relative to pub/ ("" = pub/ itself) and check it against
+     * the allow/deny lists core Magento_Sitemap uses (sitemap/file/valid_paths + general/file/public_files_valid_paths).
+     * Shared by the config backend model (on save) and every reader (stored values may predate the backend model).
+     *
+     * @param string $path
+     * @return string
+     * @throws LocalizedException absolute path, "..", or a path core does not allow
+     */
+    public function normalizeSitemapPath(string $path): string
+    {
+        $path = str_replace('\\', '/', trim($path));
+
+        // Leading "/" means pub/-relative (old generator and core Magento_Sitemap convention); drive letters are rejected
+        if (preg_match('#^[a-z]:#i', $path)) {
+            throw new LocalizedException(
+                __('Sitemap Path must be relative to the pub/ directory, e.g. "media/maps/".')
+            );
         }
-        
-        // Użycie DirectoryList do uzyskania prawidłowej ścieżki pub
-        try {
-            $pubPath = $this->directoryList->getPath(DirectoryList::PUB);
-            return $pubPath . '/' . ltrim($sitemapPath, '/');
-        } catch (\Exception $e) {
-            // Fallback do root directory w przypadku błędu
-            $rootPath = $this->directoryList->getRoot();
-            return $rootPath . '/pub/' . ltrim($sitemapPath, '/');
+
+        $path = trim($path, '/');
+        $path = $path === '' ? '' : $path . '/';
+
+        // AvailablePath also rejects "../" (LFI); the file name only has to satisfy the "*.xml" mask
+        $this->pathValidator->setPaths($this->sitemapConfigReader->getValidPaths());
+        if (!$this->pathValidator->isValid('/' . $path . 'sitemap.xml')) {
+            throw new LocalizedException(
+                __('Sitemap Path "%1" is not allowed: %2', $path, implode(' ', $this->pathValidator->getMessages()))
+            );
         }
+
+        return $path;
+    }
+
+    /**
+     * Sitemap directory of a store, relative to pub/, validated ("" or "dir/sub/")
+     *
+     * @param int $storeId
+     * @return string
+     * @throws LocalizedException
+     */
+    public function getSitemapPath(int $storeId): string
+    {
+        $path = $this->scopeConfig->getValue(self::XML_PATH_SITEMAP_PATH, ScopeInterface::SCOPE_STORE, $storeId);
+
+        return $this->normalizeSitemapPath((string)($path ?? self::DEFAULT_SITEMAP_PATH));
+    }
+
+    /**
+     * Absolute sitemap directory of a store (with trailing slash)
+     *
+     * @param int $storeId
+     * @return string
+     * @throws LocalizedException
+     */
+    public function getFullSitemapPath(int $storeId): string
+    {
+        return rtrim($this->directoryList->getPath(DirectoryList::PUB), '/') . '/' . $this->getSitemapPath($storeId);
+    }
+
+    /**
+     * Public URL of a sitemap file: store web base (never the link base, which may carry the store code) + path
+     *
+     * @param int $storeId
+     * @param string $fileName
+     * @return string
+     * @throws LocalizedException
+     */
+    public function getSitemapUrl(int $storeId, string $fileName): string
+    {
+        // ponytail: assumes the web base URL maps to pub/ (standard 2.4 docroot); core's doc-root sniffing not copied
+        $store = $this->storeManager->getStore($storeId);
+        $baseUrl = rtrim((string)$store->getBaseUrl(UrlInterface::URL_TYPE_WEB, $store->isUrlSecure()), '/');
+
+        return $baseUrl . '/' . $this->getSitemapPath($storeId) . $fileName;
+    }
+
+    /**
+     * The only place sitemap file names are built: "<store code>_sitemap<suffix>.xml[.gz]"
+     *
+     * @param int $storeId
+     * @param string $suffix "" (main/first file), "_index" or "_<N>"
+     * @param bool $compressed
+     * @return string
+     */
+    public function getSitemapFileName(int $storeId, string $suffix = '', bool $compressed = false): string
+    {
+        return $this->storeManager->getStore($storeId)->getCode() . '_sitemap' . $suffix . '.xml'
+            . ($compressed ? '.gz' : '');
+    }
+
+    /**
+     * Whether a base name is one of this store's sitemap files (the inverse of getSitemapFileName())
+     *
+     * @param int $storeId
+     * @param string $fileName
+     * @return bool
+     */
+    public function isSitemapFileOfStore(int $storeId, string $fileName): bool
+    {
+        $code = preg_quote((string)$this->storeManager->getStore($storeId)->getCode(), '/');
+
+        return (bool)preg_match('/^' . $code . '_sitemap(_index|_\d+)?\.xml(\.gz)?$/', $fileName);
+    }
+
+    /**
+     * Name of the store's published entry file (index first, then the single sitemap), null if none exists
+     *
+     * @param int $storeId
+     * @return string|null
+     * @throws LocalizedException
+     */
+    public function getPublishedSitemapFileName(int $storeId): ?string
+    {
+        $dir = $this->getFullSitemapPath($storeId);
+        foreach ([['_index', true], ['_index', false], ['', true], ['', false]] as [$suffix, $compressed]) {
+            $fileName = $this->getSitemapFileName($storeId, $suffix, $compressed);
+            if (is_file($dir . $fileName)) {
+                return $fileName;
+            }
+        }
+
+        return null;
     }
 
     /**

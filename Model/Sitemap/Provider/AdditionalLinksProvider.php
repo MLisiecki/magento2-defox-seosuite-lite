@@ -10,17 +10,12 @@ declare(strict_types=1);
 namespace Defox\SEOSuite\Model\Sitemap\Provider;
 
 use Defox\SEOSuite\Model\Sitemap\SitemapItem;
-use Defox\SEOSuite\Model\Sitemap\SitemapItemInterface;
-use Magento\Framework\App\ResourceConnection;
-use Magento\Store\Model\StoreManagerInterface;
-use Defox\SEOSuite\Helper\Config;
-use Defox\SEOSuite\Logger\Logger;
-use Defox\SEOSuite\Model\Cache\CacheManager;
 
 /**
  * Additional links provider for sitemap
- * 
- * Provides custom links that are manually added by administrators
+ *
+ * Provides custom links from the "Custom Links" setting and the defox_seosuite_sitemap_additional_links table.
+ * Only links on the store's own host are accepted.
  */
 class AdditionalLinksProvider extends AbstractProvider
 {
@@ -45,35 +40,8 @@ class AdditionalLinksProvider extends AbstractProvider
      */
     public function getItems(int $storeId, int $limit = 0, int $offset = 0): array
     {
-        $cacheKey = $this->getCacheKey($storeId, $limit, $offset);
-        $cachedData = $this->loadFromCache($cacheKey);
-        
-        if ($cachedData !== null) {
-            return $cachedData;
-        }
-        
-        try {
-            $items = [];
-            $links = $this->getAdditionalLinks($storeId, $limit, $offset);
-            
-            foreach ($links as $link) {
-                $item = new SitemapItem($link['url']);
-                $item->setChangefreq($link['changefreq']);
-                $item->setPriority((float)$link['priority']);
-                
-                // Set last modification to current date if not specified
-                $item->setLastmod(date('Y-m-d'));
-                
-                $items[] = $item;
-            }
-            
-            $this->saveToCache($cacheKey, $items);
-            
-            return $items;
-        } catch (\Exception $e) {
-            $this->logger->error('Error generating additional links sitemap items: ' . $e->getMessage());
-            return [];
-        }
+        $items = $this->getAllItems($storeId);
+        return $limit > 0 ? array_slice($items, $offset, $limit) : array_slice($items, $offset);
     }
 
     /**
@@ -81,66 +49,142 @@ class AdditionalLinksProvider extends AbstractProvider
      */
     public function getItemsCount(int $storeId): int
     {
-        $cacheKey = $this->getCountCacheKey($storeId);
-        $cachedCount = $this->loadFromCache($cacheKey);
-        
-        if ($cachedCount !== null) {
-            return (int)$cachedCount;
+        return count($this->getAllItems($storeId));
+    }
+
+    /**
+     * All valid links, config lines first, then table rows by link_id
+     *
+     * ponytail: built in full per call; fine for hand-maintained lists, page in SQL if the table ever grows large.
+     *
+     * @param int $storeId
+     * @return SitemapItem[]
+     */
+    private function getAllItems(int $storeId): array
+    {
+        $baseUrl = $this->getBaseUrl($storeId);
+        $items = [];
+
+        $customLinks = (string)$this->config->getValue('defox_seosuite/sitemap/additional_links/custom_links', $storeId);
+        foreach (preg_split('/\R/', $customLinks) as $line) {
+            if (trim($line) === '') {
+                continue;
+            }
+            $parts = array_map('trim', explode('|', $line));
+            $item = $this->createItem($baseUrl, $parts[0], $parts[1] ?? null, $parts[2] ?? null, null, $storeId);
+            if ($item) {
+                $items[] = $item;
+            }
         }
-        
-        try {
-            $connection = $this->resourceConnection->getConnection();
-            $table = $this->resourceConnection->getTableName('defox_seosuite_sitemap_additional_links');
-            
-            $select = $connection->select()
-                ->from($table, 'COUNT(*)')
-                ->where('store_id IN (?)', [0, $storeId])
-                ->where('is_active = ?', 1);
-            
-            $count = (int)$connection->fetchOne($select);
-            
-            $this->saveToCache($cacheKey, [$count]);
-            
-            return $count;
-        } catch (\Exception $e) {
-            $this->logger->error('Error getting additional links count for sitemap: ' . $e->getMessage());
-            return 0;
+
+        foreach ($this->getAdditionalLinks($storeId) as $link) {
+            $item = $this->createItem(
+                $baseUrl,
+                (string)$link['url'],
+                $link['priority'] ?? null,
+                $link['changefreq'] ?? null,
+                $link['updated_at'] ?? null,
+                $storeId
+            );
+            if ($item) {
+                $items[] = $item;
+            }
         }
+
+        return $items;
+    }
+
+    /**
+     * Sitemap item for one link, or null (logged) when the link is not a same-host http(s) URL
+     *
+     * @param string $baseUrl
+     * @param string $link Relative path or absolute URL
+     * @param mixed $priority
+     * @param mixed $changefreq
+     * @param string|null $updatedAt
+     * @param int $storeId
+     * @return SitemapItem|null
+     */
+    private function createItem(
+        string $baseUrl,
+        string $link,
+        mixed $priority,
+        mixed $changefreq,
+        ?string $updatedAt,
+        int $storeId
+    ): ?SitemapItem {
+        $url = $this->resolveUrl($baseUrl, $link);
+        if ($url === null) {
+            $this->logger->warning(sprintf('Sitemap additional link rejected for store %d: "%s"', $storeId, $link));
+            return null;
+        }
+
+        $item = new SitemapItem($url);
+        $item->setPriority(
+            is_numeric($priority) && $priority >= 0 && $priority <= 1
+                ? (float)$priority
+                : $this->getDefaultPriority($storeId)
+        );
+        $item->setChangefreq(
+            in_array($changefreq, self::CHANGEFREQS, true) ? $changefreq : $this->getDefaultChangefreq($storeId)
+        );
+        if ($updatedAt) {
+            $item->setLastmod(date('Y-m-d', strtotime($updatedAt)));
+        }
+
+        return $item;
+    }
+
+    /**
+     * Absolute URL for a relative path ("about-us", "/blog?p=2") or a same-host http(s) URL; null otherwise
+     * (other hosts, protocol-relative "//host", javascript:/mailto:/data: and any other scheme, whitespace)
+     *
+     * @param string $baseUrl Store base URL with trailing slash
+     * @param string $link
+     * @return string|null
+     */
+    private function resolveUrl(string $baseUrl, string $link): ?string
+    {
+        if ($link === '' || preg_match('/[\s\x00-\x1f\x7f\\\\]/', $link)) {
+            return null;
+        }
+
+        $parts = parse_url($link);
+        if ($parts === false) {
+            return null;
+        }
+
+        if (!isset($parts['scheme']) && !isset($parts['host'])) {
+            return $baseUrl . ltrim($link, '/');
+        }
+
+        $base = parse_url($baseUrl);
+        $sameOrigin = in_array(strtolower($parts['scheme'] ?? ''), ['http', 'https'], true)
+            && !isset($parts['user'])
+            && strcasecmp($parts['host'] ?? '', $base['host'] ?? '') === 0
+            && ($parts['port'] ?? null) === ($base['port'] ?? null);
+
+        return $sameOrigin ? $link : null;
     }
 
     /**
      * Get additional links from database
      *
      * @param int $storeId
-     * @param int $limit
-     * @param int $offset
      * @return array
      */
-    private function getAdditionalLinks(int $storeId, int $limit = 0, int $offset = 0): array
+    private function getAdditionalLinks(int $storeId): array
     {
         $connection = $this->resourceConnection->getConnection();
         $table = $this->resourceConnection->getTableName('defox_seosuite_sitemap_additional_links');
-        
+
         $select = $connection->select()
             ->from($table)
             ->where('store_id IN (?)', [0, $storeId])
             ->where('is_active = ?', 1)
             ->order('link_id ASC');
-        
-        if ($limit > 0) {
-            $select->limit($limit, $offset);
-        }
-        
-        return $connection->fetchAll($select);
-    }
 
-    /**
-     * @inheritDoc
-     */
-    protected function getEntityUrl(string $entityId, string $entityType, int $storeId): ?string
-    {
-        // Not applicable for additional links
-        return null;
+        return $connection->fetchAll($select);
     }
 
     /**
@@ -153,15 +197,15 @@ class AdditionalLinksProvider extends AbstractProvider
     {
         $connection = $this->resourceConnection->getConnection();
         $table = $this->resourceConnection->getTableName('defox_seosuite_sitemap_additional_links');
-        
+
         $select = $connection->select()
             ->from($table)
             ->where('store_id IN (?)', [0, $storeId])
             ->where('is_active = ?', 1)
             ->order(['group_code ASC', 'title ASC']);
-        
+
         $links = $connection->fetchAll($select);
-        
+
         $grouped = [];
         foreach ($links as $link) {
             $groupCode = $link['group_code'] ?: 'other';
@@ -170,7 +214,7 @@ class AdditionalLinksProvider extends AbstractProvider
             }
             $grouped[$groupCode][] = $link;
         }
-        
+
         return $grouped;
     }
 }

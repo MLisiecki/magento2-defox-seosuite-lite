@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Defox\SEOSuite\Observer;
 
 use Defox\SEOSuite\Helper\Config;
+use Defox\SEOSuite\Model\SafeErrorMessage;
 use Magento\Framework\Event\Observer;
 use Magento\Framework\Event\ObserverInterface;
 use Magento\Framework\Mail\Template\TransportBuilder;
@@ -48,6 +49,11 @@ class SendSitemapErrorNotification implements ObserverInterface
     private LoggerInterface $logger;
 
     /**
+     * @var SafeErrorMessage
+     */
+    private SafeErrorMessage $safeErrorMessage;
+
+    /**
      * Constructor
      *
      * @param Config $config
@@ -55,19 +61,22 @@ class SendSitemapErrorNotification implements ObserverInterface
      * @param ScopeConfigInterface $scopeConfig
      * @param StoreManagerInterface $storeManager
      * @param LoggerInterface $logger
+     * @param SafeErrorMessage $safeErrorMessage
      */
     public function __construct(
         Config $config,
         TransportBuilder $transportBuilder,
         ScopeConfigInterface $scopeConfig,
         StoreManagerInterface $storeManager,
-        LoggerInterface $logger
+        LoggerInterface $logger,
+        SafeErrorMessage $safeErrorMessage
     ) {
         $this->config = $config;
         $this->transportBuilder = $transportBuilder;
         $this->scopeConfig = $scopeConfig;
         $this->storeManager = $storeManager;
         $this->logger = $logger;
+        $this->safeErrorMessage = $safeErrorMessage;
     }
 
     /**
@@ -80,7 +89,7 @@ class SendSitemapErrorNotification implements ObserverInterface
     {
         $storeId = $observer->getData('store_id');
         
-        if (!$this->config->getValue('sitemap/generation/error_notification', $storeId)) {
+        if (!$this->config->getValue('sitemap/generation_error_notification', $storeId)) {
             return;
         }
 
@@ -105,8 +114,8 @@ class SendSitemapErrorNotification implements ObserverInterface
             $emailData = [
                 'store_name' => $store->getName(),
                 'store_id' => $storeId,
-                'error_message' => $exception->getMessage(),
-                'error_trace' => $exception->getTraceAsString(),
+                // Raw core messages (absolute paths) go to the log only, never into the e-mail
+                'error_message' => $this->safeErrorMessage->get($exception),
                 'generation_stats' => $this->formatStats($stats),
                 'datetime' => date('Y-m-d H:i:s')
             ];
@@ -157,11 +166,9 @@ class SendSitemapErrorNotification implements ObserverInterface
             }
         }
         
-        if (isset($stats['errors']) && !empty($stats['errors'])) {
-            $output[] = 'Errors:';
-            foreach ($stats['errors'] as $error) {
-                $output[] = '  - ' . $error;
-            }
+        // Error texts are raw exception messages (already logged by the generator): count only
+        if (!empty($stats['errors'])) {
+            $output[] = 'Errors: ' . count($stats['errors']);
         }
         
         return implode("\n", $output);

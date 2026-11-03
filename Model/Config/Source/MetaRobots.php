@@ -3,7 +3,7 @@
  * Meta robots source model
  *
  * @package     Defox_SEOSuite
- * @copyright   Copyright (c) 2024 Defox (https://defox.com)
+ * @copyright   Copyright (c) 2024 Defox (https://defox.pl)
  * @license     Defox Proprietary License
  */
 

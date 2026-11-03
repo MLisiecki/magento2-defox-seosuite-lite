@@ -10,6 +10,8 @@ declare(strict_types=1);
 
 namespace Defox\SEOSuite\Model\StructuredData\Renderer;
 
+use Psr\Log\LoggerInterface;
+
 /**
  * JSON-LD renderer for structured data
  * 
@@ -17,6 +19,26 @@ namespace Defox\SEOSuite\Model\StructuredData\Renderer;
  */
 class JsonLd
 {
+    /**
+     * JSON_HEX_TAG|JSON_HEX_AMP keep "</script>" and entities inert inside the script tag (INV-B);
+     * invalid UTF-8 is substituted instead of failing the whole document (CR-19)
+     */
+    private const JSON_FLAGS = JSON_HEX_TAG | JSON_HEX_AMP | JSON_INVALID_UTF8_SUBSTITUTE
+        | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE;
+
+    /**
+     * @var LoggerInterface
+     */
+    private LoggerInterface $logger;
+
+    /**
+     * @param LoggerInterface $logger
+     */
+    public function __construct(LoggerInterface $logger)
+    {
+        $this->logger = $logger;
+    }
+
     /**
      * Render structured data as JSON-LD script tag
      *
@@ -33,9 +55,10 @@ class JsonLd
         $jsonData = $this->prepareData($data);
         
         // Encode to JSON with proper formatting
-        $json = json_encode($jsonData, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        $json = json_encode($jsonData, self::JSON_FLAGS | JSON_PRETTY_PRINT);
         
         if ($json === false) {
+            $this->logger->warning('Defox_SEOSuite: JSON-LD encoding failed: ' . json_last_error_msg());
             return '';
         }
         
@@ -82,11 +105,15 @@ class JsonLd
     {
         // If the array has numeric keys, it's a list of items
         if (isset($data[0])) {
-            // Multiple items - check if we should use @graph
+            // Multiple items - use @graph with @context only at top level
             if (count($data) > 1) {
+                $cleanedItems = array_map(function (array $item): array {
+                    unset($item['@context']);
+                    return $item;
+                }, $data);
                 return [
                     '@context' => 'https://schema.org',
-                    '@graph' => $data
+                    '@graph' => $cleanedItems
                 ];
             } else {
                 // Single item in array - ensure @context is first
@@ -118,65 +145,5 @@ class JsonLd
         
         return ['@context' => $context] + $data;
     }
-    
-    /**
-     * Validate JSON-LD structure
-     *
-     * @param array $data
-     * @return bool
-     */
-    public function validate(array $data): bool
-    {
-        if (empty($data)) {
-            return false;
-        }
-        
-        // Check for required @type field
-        if (isset($data[0])) {
-            // Multiple items
-            foreach ($data as $item) {
-                if (!isset($item['@type'])) {
-                    return false;
-                }
-            }
-        } else {
-            // Single item
-            if (!isset($data['@type'])) {
-                return false;
-            }
-        }
-        
-        // Try to encode to JSON to check if it's valid
-        $json = json_encode($data);
-        
-        return $json !== false;
-    }
-    
-    /**
-     * Minify JSON-LD output
-     *
-     * @param string $jsonLd
-     * @return string
-     */
-    public function minify(string $jsonLd): string
-    {
-        // Extract JSON from script tag
-        if (preg_match('/<script[^>]*>(.*?)<\/script>/s', $jsonLd, $matches)) {
-            $json = $matches[1];
-            
-            // Decode and re-encode without pretty print
-            $data = json_decode($json, true);
-            if ($data !== null) {
-                $minified = json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-                if ($minified !== false) {
-                    return sprintf(
-                        '<script type="application/ld+json">%s</script>',
-                        $minified
-                    );
-                }
-            }
-        }
-        
-        return $jsonLd;
-    }
+
 }

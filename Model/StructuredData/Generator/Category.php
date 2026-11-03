@@ -11,10 +11,10 @@ declare(strict_types=1);
 namespace Defox\SEOSuite\Model\StructuredData\Generator;
 
 use Defox\SEOSuite\Helper\Config;
-use Defox\SEOSuite\Model\Cache\CacheManager;
+use Defox\SEOSuite\Model\Text\Cleaner;
 use Defox\SEOSuite\Model\StructuredData\AbstractGenerator;
+use Defox\SEOSuite\Model\StructuredData\OrganizationDataProvider;
 use Magento\Catalog\Api\Data\CategoryInterface;
-use Magento\Catalog\Api\CategoryRepositoryInterface;
 use Magento\Catalog\Helper\Category as CategoryHelper;
 use Magento\Catalog\Model\Category as CategoryModel;
 use Magento\Catalog\Model\ResourceModel\Product\CollectionFactory as ProductCollectionFactory;
@@ -40,36 +40,30 @@ class Category extends AbstractGenerator
     private ProductCollectionFactory $productCollectionFactory;
     
     /**
-     * @var CategoryRepositoryInterface
-     */
-    private CategoryRepositoryInterface $categoryRepository;
-    
-    /**
      * Constructor
      *
      * @param Config $configHelper
-     * @param CacheManager $cacheManager
      * @param StoreManagerInterface $storeManager
      * @param LoggerInterface $logger
      * @param ScopeConfigInterface $scopeConfig
+     * @param Cleaner $textCleaner
+     * @param OrganizationDataProvider $organizationData
      * @param CategoryHelper $categoryHelper
      * @param ProductCollectionFactory $productCollectionFactory
-     * @param CategoryRepositoryInterface $categoryRepository
      */
     public function __construct(
         Config $configHelper,
-        CacheManager $cacheManager,
         StoreManagerInterface $storeManager,
         LoggerInterface $logger,
         ScopeConfigInterface $scopeConfig,
+        Cleaner $textCleaner,
+        OrganizationDataProvider $organizationData,
         CategoryHelper $categoryHelper,
-        ProductCollectionFactory $productCollectionFactory,
-        CategoryRepositoryInterface $categoryRepository
+        ProductCollectionFactory $productCollectionFactory
     ) {
-        parent::__construct($configHelper, $cacheManager, $storeManager, $logger, $scopeConfig);
+        parent::__construct($configHelper, $storeManager, $logger, $scopeConfig, $textCleaner, $organizationData);
         $this->categoryHelper = $categoryHelper;
         $this->productCollectionFactory = $productCollectionFactory;
-        $this->categoryRepository = $categoryRepository;
     }
     
     /**
@@ -90,9 +84,13 @@ class Category extends AbstractGenerator
         $data = [
             '@type' => 'CollectionPage',
             'name' => $category->getName(),
-            'url' => $categoryUrl,
-            'description' => $this->getCategoryDescription($category)
+            'url' => $categoryUrl
         ];
+
+        $description = $this->getCategoryDescription($category);
+        if ($description !== '') {
+            $data['description'] = $description;
+        }
         
         // Add breadcrumb
         $breadcrumb = $this->getBreadcrumb($category);
@@ -127,11 +125,9 @@ class Category extends AbstractGenerator
         }
         
         // Add publisher (organization) with FULL data from SEO Suite config
-        if ($this->configHelper->isStructuredDataOrganizationEnabled()) {
-            $organization = $this->getFullOrganizationData();
-            if (!empty($organization)) {
-                $data['publisher'] = $organization;
-            }
+        $organization = $this->organizationData->getNamedData();
+        if ($organization !== null) {
+            $data['publisher'] = $organization;
         }
         
         return $data;
@@ -170,17 +166,6 @@ class Category extends AbstractGenerator
     }
     
     /**
-     * Get entity ID
-     *
-     * @param mixed $entity
-     * @return string|null
-     */
-    protected function getEntityId($entity): ?string
-    {
-        return $entity->getId() ? (string)$entity->getId() : null;
-    }
-    
-    /**
      * Get proper category URL
      *
      * @param CategoryModel $category
@@ -202,7 +187,12 @@ class Category extends AbstractGenerator
             $urlKey = $category->getUrlKey();
             if ($urlKey) {
                 $baseUrl = $this->storeManager->getStore()->getBaseUrl();
-                $categoryUrl = $baseUrl . $urlKey . '.html';
+                $suffix = $this->scopeConfig->getValue(
+                    'catalog/seo/category_url_suffix',
+                    \Magento\Store\Model\ScopeInterface::SCOPE_STORE,
+                    $this->storeManager->getStore()->getId()
+                );
+                $categoryUrl = $baseUrl . $urlKey . ($suffix ?: '');
             } else {
                 // Fallback to homepage for root categories without URL key
                 return $this->storeManager->getStore()->getBaseUrl();
@@ -220,16 +210,8 @@ class Category extends AbstractGenerator
      */
     private function isRootCategory(CategoryModel $category): bool
     {
-        // Check if category level is 2 or less (root categories)
-        if ($category->getLevel() <= 2) {
-            return true;
-        }
-        
-        // Check if this is the main category that should point to homepage
-        // You can add additional logic here based on your store structure
-        // For example, checking if it's marked as "main" in some custom attribute
-        
-        return false;
+        $rootCategoryId = (int)$this->storeManager->getStore()->getRootCategoryId();
+        return (int)$category->getId() <= $rootCategoryId;
     }
     
     /**
@@ -285,47 +267,38 @@ class Category extends AbstractGenerator
             'itemListElement' => []
         ];
         
+        // Add Home as first breadcrumb item
+        $breadcrumb['itemListElement'][] = [
+            '@type' => 'ListItem',
+            'position' => 1,
+            'name' => __('Home')->render(),
+            'item' => $this->storeManager->getStore()->getBaseUrl()
+        ];
+
         $path = $category->getPath();
         $pathIds = explode('/', $path);
-        
-        // Remove root category IDs (1 and 2)
-        $pathIds = array_filter($pathIds, function($id) {
-            return $id > 2;
+
+        // Remove root category IDs (1 and store root)
+        $rootCategoryId = (int)$this->storeManager->getStore()->getRootCategoryId();
+        $pathIds = array_filter($pathIds, function ($id) use ($rootCategoryId) {
+            return (int)$id > $rootCategoryId;
         });
-        
-        $position = 1;
+
+        // Active path categories in one query (core resource model), keyed by ID (CR-29)
+        $parents = $category->getParentCategories();
+
+        $position = 2;
         foreach ($pathIds as $categoryId) {
-            if ($categoryId == $category->getId()) {
-                // Current category
-                $breadcrumb['itemListElement'][] = [
-                    '@type' => 'ListItem',
-                    'position' => $position,
-                    'item' => [
-                        '@type' => 'WebPage',
-                        '@id' => $this->getCategoryUrl($category),
-                        'name' => $category->getName()
-                    ]
-                ];
-            } else {
-                // Parent categories
-                try {
-                    $parentCategory = $this->categoryRepository->get($categoryId, $this->storeManager->getStore()->getId());
-                    if ($parentCategory && $parentCategory->getIsActive()) {
-                        $breadcrumb['itemListElement'][] = [
-                            '@type' => 'ListItem',
-                            'position' => $position,
-                            'item' => [
-                                '@type' => 'WebPage',
-                                '@id' => $this->getCategoryUrl($parentCategory),
-                                'name' => $parentCategory->getName()
-                            ]
-                        ];
-                    }
-                } catch (\Exception $e) {
-                    $this->logger->debug('Error getting parent category: ' . $e->getMessage());
-                }
+            $item = (int)$categoryId === (int)$category->getId() ? $category : ($parents[$categoryId] ?? null);
+            if ($item === null) {
+                continue;
             }
-            $position++;
+            $breadcrumb['itemListElement'][] = [
+                '@type' => 'ListItem',
+                'position' => $position++,
+                'name' => $item->getName(),
+                'item' => $this->getCategoryUrl($item)
+            ];
         }
         
         return $breadcrumb;
@@ -396,205 +369,5 @@ class Category extends AbstractGenerator
         }
         
         return $productList;
-    }
-    
-    /**
-     * Get full organization data from SEO Suite configuration
-     *
-     * @return array
-     */
-    private function getFullOrganizationData(): array
-    {
-        $organizationName = $this->configHelper->getStructuredDataOrganizationName();
-        if (!$organizationName) {
-            return [];
-        }
-        
-        $baseUrl = $this->storeManager->getStore()->getBaseUrl();
-        
-        $organization = [
-            '@type' => $this->configHelper->getStructuredDataOrganizationType() ?: 'Organization',
-            'name' => $organizationName,
-            'url' => $baseUrl
-        ];
-        
-        // Add fields only if they have values
-        $this->addIfNotEmpty($organization, 'logo', $this->getOrganizationLogoUrl($this->configHelper->getStructuredDataOrganizationLogo()));
-        $this->addIfNotEmpty($organization, 'description', $this->configHelper->getStructuredDataOrganizationDescription());
-        $this->addIfNotEmpty($organization, 'foundingDate', $this->configHelper->getStructuredDataOrganizationFoundingDate());
-        $this->addIfNotEmpty($organization, 'taxID', $this->configHelper->getStructuredDataOrganizationTaxId());
-        $this->addIfNotEmpty($organization, 'vatID', $this->configHelper->getStructuredDataOrganizationVatId());
-        
-        // Add address only if it has data
-        $address = $this->getOrganizationAddress();
-        if (!empty($address)) {
-            $organization['address'] = $address;
-        }
-        
-        // Add contact points only if they exist
-        $contactPoints = $this->getOrganizationContactPoints();
-        if (!empty($contactPoints)) {
-            $organization['contactPoint'] = count($contactPoints) === 1 ? $contactPoints[0] : $contactPoints;
-        }
-        
-        // Add social media profiles only if they exist
-        $socialProfiles = $this->getOrganizationSocialProfiles();
-        if (!empty($socialProfiles)) {
-            $organization['sameAs'] = $socialProfiles;
-        }
-        
-        // Add area served only if configured
-        $areaServed = $this->configHelper->getStructuredDataOrganizationAreaServed();
-        if (!empty($areaServed)) {
-            $organization['areaServed'] = $areaServed;
-        }
-        
-        return $organization;
-    }
-    
-    /**
-     * Add field to array only if value is not empty
-     *
-     * @param array $array
-     * @param string $key
-     * @param mixed $value
-     */
-    private function addIfNotEmpty(array &$array, string $key, $value): void
-    {
-        if ($value !== null && $value !== '' && $value !== []) {
-            $array[$key] = $value;
-        }
-    }
-    
-    /**
-     * Get organization logo URL
-     *
-     * @param string $logoPath
-     * @return string|null
-     */
-    private function getOrganizationLogoUrl(string $logoPath = ''): ?string
-    {
-        if (empty($logoPath)) {
-            return null;
-        }
-        
-        if (filter_var($logoPath, FILTER_VALIDATE_URL)) {
-            return $logoPath;
-        }
-        
-        $baseUrl = $this->storeManager->getStore()->getBaseUrl(\Magento\Framework\UrlInterface::URL_TYPE_MEDIA);
-        return $baseUrl . 'logo/' . ltrim($logoPath, '/');
-    }
-    
-    /**
-     * Get organization address
-     *
-     * @return array
-     */
-    private function getOrganizationAddress(): array
-    {
-        $address = [];
-        
-        $streetAddress = $this->configHelper->getStructuredDataOrganizationStreetAddress();
-        $locality = $this->configHelper->getStructuredDataOrganizationLocality();
-        $region = $this->configHelper->getStructuredDataOrganizationRegion();
-        $postalCode = $this->configHelper->getStructuredDataOrganizationPostalCode();
-        $country = $this->configHelper->getStructuredDataOrganizationCountry();
-        
-        // Only create address if at least one field has value
-        if ($streetAddress || $locality || $region || $postalCode || $country) {
-            $address = ['@type' => 'PostalAddress'];
-            
-            $this->addIfNotEmpty($address, 'streetAddress', $streetAddress);
-            $this->addIfNotEmpty($address, 'addressLocality', $locality);
-            $this->addIfNotEmpty($address, 'addressRegion', $region);
-            $this->addIfNotEmpty($address, 'postalCode', $postalCode);
-            $this->addIfNotEmpty($address, 'addressCountry', $country);
-        }
-        
-        return $address;
-    }
-    
-    /**
-     * Get organization contact points
-     *
-     * @return array
-     */
-    private function getOrganizationContactPoints(): array
-    {
-        $contactPoints = [];
-        $availableLanguages = $this->configHelper->getStructuredDataOrganizationAvailableLanguages();
-        
-        // Customer Service
-        $customerPhone = $this->configHelper->getStructuredDataOrganizationCustomerServicePhone();
-        $customerEmail = $this->configHelper->getStructuredDataOrganizationCustomerServiceEmail();
-        if ($customerPhone || $customerEmail) {
-            $contact = [
-                '@type' => 'ContactPoint',
-                'contactType' => 'customer service'
-            ];
-            $this->addIfNotEmpty($contact, 'telephone', $customerPhone);
-            $this->addIfNotEmpty($contact, 'email', $customerEmail);
-            $this->addIfNotEmpty($contact, 'availableLanguage', $availableLanguages);
-            $contactPoints[] = $contact;
-        }
-        
-        // Technical Support
-        $techPhone = $this->configHelper->getStructuredDataOrganizationTechSupportPhone();
-        $techEmail = $this->configHelper->getStructuredDataOrganizationTechSupportEmail();
-        if ($techPhone || $techEmail) {
-            $contact = [
-                '@type' => 'ContactPoint',
-                'contactType' => 'technical support'
-            ];
-            $this->addIfNotEmpty($contact, 'telephone', $techPhone);
-            $this->addIfNotEmpty($contact, 'email', $techEmail);
-            $this->addIfNotEmpty($contact, 'availableLanguage', $availableLanguages);
-            $contactPoints[] = $contact;
-        }
-        
-        // Sales
-        $salesPhone = $this->configHelper->getStructuredDataOrganizationSalesPhone();
-        $salesEmail = $this->configHelper->getStructuredDataOrganizationSalesEmail();
-        if ($salesPhone || $salesEmail) {
-            $contact = [
-                '@type' => 'ContactPoint',
-                'contactType' => 'sales'
-            ];
-            $this->addIfNotEmpty($contact, 'telephone', $salesPhone);
-            $this->addIfNotEmpty($contact, 'email', $salesEmail);
-            $this->addIfNotEmpty($contact, 'availableLanguage', $availableLanguages);
-            $contactPoints[] = $contact;
-        }
-        
-        return $contactPoints;
-    }
-    
-    /**
-     * Get organization social media profiles
-     *
-     * @return array
-     */
-    private function getOrganizationSocialProfiles(): array
-    {
-        $profiles = [];
-        
-        $socialUrls = [
-            $this->configHelper->getStructuredDataOrganizationFacebook(),
-            $this->configHelper->getStructuredDataOrganizationTwitter(),
-            $this->configHelper->getStructuredDataOrganizationInstagram(),
-            $this->configHelper->getStructuredDataOrganizationYoutube(),
-            $this->configHelper->getStructuredDataOrganizationLinkedin(),
-            $this->configHelper->getStructuredDataOrganizationPinterest(),
-            $this->configHelper->getStructuredDataOrganizationTiktok()
-        ];
-        
-        foreach ($socialUrls as $url) {
-            if ($url && filter_var($url, FILTER_VALIDATE_URL)) {
-                $profiles[] = $url;
-            }
-        }
-        
-        return $profiles;
     }
 }

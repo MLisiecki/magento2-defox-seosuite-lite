@@ -77,11 +77,6 @@ class GenerateSitemap
      */
     public function execute(): void
     {
-        if (!$this->config->getValue('defox_seosuite/sitemap/enabled')) {
-            $this->logger->info('Sitemap generation is disabled globally.');
-            return;
-        }
-
         try {
             // Set area code first, before any other operations
             try {
@@ -100,9 +95,9 @@ class GenerateSitemap
                 
                 $storeId = (int)$store->getId();
                 
-                // Check if sitemap is enabled for this store
+                // Gate per store: a store can enable the sitemap while the default scope has it off (CR-35)
                 if (!$this->config->getValue('defox_seosuite/sitemap/enabled', $storeId)) {
-                    $this->logger->info(sprintf('Sitemap generation is disabled for store %d', $storeId));
+                    $this->logger->debug(sprintf('Sitemap generation is disabled for store %d', $storeId));
                     continue;
                 }
                 

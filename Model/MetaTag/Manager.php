@@ -10,7 +10,9 @@ declare(strict_types=1);
 
 namespace Defox\SEOSuite\Model\MetaTag;
 
-use Defox\SEOSuite\Api\TemplateRepositoryInterface;
+use Defox\SEOSuite\Api\Data\TemplateInterface as T;
+use Defox\SEOSuite\Model\ResourceModel\Template\CollectionFactory as TemplateCollectionFactory;
+use Defox\SEOSuite\Model\Template;
 use Defox\SEOSuite\Template\VariableProcessorFactory;
 use Magento\Framework\App\CacheInterface;
 use Magento\Store\Model\StoreManagerInterface;
@@ -34,9 +36,41 @@ class Manager
     private const CACHE_LIFETIME = 3600;
 
     /**
-     * @var TemplateRepositoryInterface
+     * Result field => template column, per template type. Templates of every type are merged by priority per field;
+     * the type limits which fields a template may contribute (CR-09).
      */
-    private TemplateRepositoryInterface $templateRepository;
+    private const TYPE_FIELDS = [
+        Template::TYPE_COMPREHENSIVE => [
+            'meta_title' => T::META_TITLE_TEMPLATE,
+            'meta_description' => T::META_DESCRIPTION_TEMPLATE,
+            'meta_keywords' => T::META_KEYWORDS_TEMPLATE,
+            'meta_robots' => T::META_ROBOTS_TEMPLATE,
+            'og_title' => T::OG_TITLE_TEMPLATE,
+            'og_description' => T::OG_DESCRIPTION_TEMPLATE,
+            'og_type' => T::OG_TYPE_TEMPLATE,
+            'og_image' => T::OG_IMAGE_TEMPLATE,
+        ],
+        Template::TYPE_META_TITLE => ['meta_title' => T::META_TITLE_TEMPLATE],
+        Template::TYPE_META_DESCRIPTION => ['meta_description' => T::META_DESCRIPTION_TEMPLATE],
+        Template::TYPE_META_KEYWORDS => ['meta_keywords' => T::META_KEYWORDS_TEMPLATE],
+        Template::TYPE_META_ROBOTS => ['meta_robots' => T::META_ROBOTS_TEMPLATE],
+        Template::TYPE_OPEN_GRAPH => [
+            'og_title' => T::OG_TITLE_TEMPLATE,
+            'og_description' => T::OG_DESCRIPTION_TEMPLATE,
+            'og_type' => T::OG_TYPE_TEMPLATE,
+            'og_image' => T::OG_IMAGE_TEMPLATE,
+        ],
+    ];
+
+    /**
+     * Fields copied verbatim (no variable processing)
+     */
+    private const LITERAL_FIELDS = ['meta_robots', 'og_type'];
+
+    /**
+     * @var TemplateCollectionFactory
+     */
+    private TemplateCollectionFactory $templateCollectionFactory;
 
     /**
      * @var VariableProcessorFactory
@@ -59,25 +93,27 @@ class Manager
     private CacheInterface $cache;
 
     /**
-     * @var array
+     * Active template rows per entity type + store (empty list included)
+     *
+     * @var array<string, array<int, array<string, mixed>>>
      */
-    private array $processedCache = [];
+    private array $templateCache = [];
 
     /**
-     * @param TemplateRepositoryInterface $templateRepository
+     * @param TemplateCollectionFactory $templateCollectionFactory
      * @param VariableProcessorFactory $processorFactory
      * @param StoreManagerInterface $storeManager
      * @param LoggerInterface $logger
      * @param CacheInterface $cache
      */
     public function __construct(
-        TemplateRepositoryInterface $templateRepository,
+        TemplateCollectionFactory $templateCollectionFactory,
         VariableProcessorFactory $processorFactory,
         StoreManagerInterface $storeManager,
         LoggerInterface $logger,
         CacheInterface $cache
     ) {
-        $this->templateRepository = $templateRepository;
+        $this->templateCollectionFactory = $templateCollectionFactory;
         $this->processorFactory = $processorFactory;
         $this->storeManager = $storeManager;
         $this->logger = $logger;
@@ -87,127 +123,108 @@ class Manager
     /**
      * Apply meta tag templates to entity
      *
+     * Active templates of all types are merged per field: the highest-priority template that yields a non-empty
+     * value for a field wins it.
+     *
      * @param mixed $entity
      * @param string $entityType
-     * @param string $templateType
      * @return array
      * @throws \JsonException
      */
-    public function applyTemplates($entity, string $entityType, string $templateType = 'comprehensive'): array
+    public function applyTemplates($entity, string $entityType): array
     {
         $storeId = (int)$this->storeManager->getStore()->getId();
-        $entityId = method_exists($entity, 'getId') ? $entity->getId() : spl_object_hash($entity);
-        
-        // Check cache first
-        $cacheKey = $this->getCacheKey($entityType, $entityId, $templateType, $storeId);
-        if (isset($this->processedCache[$cacheKey])) {
-            return $this->processedCache[$cacheKey];
-        }
-        
-        $cachedResult = $this->cache->load($cacheKey);
-        if ($cachedResult !== false) {
-            $result = json_decode($cachedResult, true);
-            if (is_array($result)) {
-                $this->processedCache[$cacheKey] = $result;
-                return $result;
-            }
-        }
 
-        // Get applicable templates
-        $templates = $this->templateRepository->getByTypeAndEntityType($templateType, $entityType, $storeId);
-        
-        if (empty($templates)) {
-            $this->logDebug('No templates found for entity type and template type');
+        $templates = $this->getTemplates($entityType, $storeId);
+        if (!$templates) {
             return [];
         }
 
+        // ponytail: per-entity results are not cached — entity saves never cleaned them (CR-32); FPC caches the page
         $result = [];
-        
+        $processor = null;
+
         foreach ($templates as $template) {
-            
-            if (!$template->getIsActive()) {
-                continue;
-            }
-
             // Check conditions if any
-            if ($template->getConditionsSerialized() && !$this->checkConditions($entity, $template->getConditionsSerialized())) {
+            if (!empty($template[T::CONDITIONS_SERIALIZED])
+                && !$this->checkConditions($entity, (string)$template[T::CONDITIONS_SERIALIZED])
+            ) {
                 continue;
             }
 
-            // Get processor for this entity
             try {
-                $processor = $this->processorFactory->create($entity);
-                
-                if (!$processor->canProcess($entity)) {
-                    continue;
-                }
-                
-                // Process different meta tag types
-                if ($template->getMetaTitleTemplate()) {
-                    $result['meta_title'] = $processor->process($template->getMetaTitleTemplate(), $entity);
-                }
+                foreach (self::TYPE_FIELDS[$template[T::TYPE]] ?? [] as $field => $column) {
+                    if (isset($result[$field]) || !isset($template[$column]) || $template[$column] === '') {
+                        continue;
+                    }
 
-                if ($template->getMetaDescriptionTemplate()) {
-                    $result['meta_description'] = $processor->process($template->getMetaDescriptionTemplate(), $entity);
-                }
+                    if (in_array($field, self::LITERAL_FIELDS, true)) {
+                        $value = (string)$template[$column];
+                    } else {
+                        $processor ??= $this->processorFactory->create($entity);
+                        if (!$processor->canProcess($entity)) {
+                            return [];
+                        }
+                        $value = $processor->process((string)$template[$column], $entity);
+                    }
 
-                if ($template->getMetaKeywordsTemplate()) {
-                    $result['meta_keywords'] = $processor->process($template->getMetaKeywordsTemplate(), $entity);
+                    if (trim($value) !== '') {
+                        $result[$field] = $value;
+                    }
                 }
-
-                if ($template->getMetaRobotsTemplate()) {
-                    $result['meta_robots'] = $template->getMetaRobotsTemplate();
-                }
-
-                if ($template->getOgTitleTemplate()) {
-                    $result['og_title'] = $processor->process($template->getOgTitleTemplate(), $entity);
-                }
-
-                if ($template->getOgDescriptionTemplate()) {
-                    $result['og_description'] = $processor->process($template->getOgDescriptionTemplate(), $entity);
-                }
-
-                if ($template->getOgTypeTemplate()) {
-                    $result['og_type'] = $template->getOgTypeTemplate();
-                }
-
-                if ($template->getOgImageTemplate()) {
-                    $result['og_image'] = $processor->process($template->getOgImageTemplate(), $entity);
-                }
-
-                // If we have a result, break (highest priority template wins)
-                if (!empty($result)) {
-                    break;
-                }
-                
             } catch (\Exception $e) {
-                $this->logDebug('Error processing template', [
-                    'template_id' => $template->getId(),
+                $this->logger->warning('[Defox_SEOSuite] MetaTag\\Manager: Error processing template', [
+                    'template_id' => $template[T::TEMPLATE_ID] ?? null,
                     'error' => $e->getMessage()
                 ]);
-                continue;
             }
         }
-
-        // Cache the result
-        $this->processedCache[$cacheKey] = $result;
-        $this->cache->save(json_encode($result, JSON_THROW_ON_ERROR), $cacheKey, ['DEFOX_SEO_METATAG'], self::CACHE_LIFETIME);
 
         return $result;
     }
 
     /**
-     * Generate cache key
+     * Active templates for entity type + store, highest priority first; cached (empty list too) per request and
+     * in the cache for CACHE_LIFETIME (CR-28)
      *
      * @param string $entityType
-     * @param mixed $entityId
-     * @param string $templateType
      * @param int $storeId
-     * @return string
+     * @return array<int, array<string, mixed>>
      */
-    private function getCacheKey(string $entityType, $entityId, string $templateType, int $storeId): string
+    private function getTemplates(string $entityType, int $storeId): array
     {
-        return self::CACHE_PREFIX . md5($entityType . '_' . $entityId . '_' . $templateType . '_' . $storeId);
+        $cacheKey = self::CACHE_PREFIX . 'templates_' . $entityType . '_' . $storeId;
+        if (isset($this->templateCache[$cacheKey])) {
+            return $this->templateCache[$cacheKey];
+        }
+
+        $cached = $this->cache->load($cacheKey);
+        $templates = $cached !== false ? json_decode((string)$cached, true) : null;
+
+        if (!is_array($templates)) {
+            $collection = $this->templateCollectionFactory->create()
+                ->addEntityTypeFilter($entityType)
+                ->addStoreFilter($storeId)
+                ->addActiveFilter()
+                ->addPriorityOrder();
+            // Deterministic order for equal priorities
+            $collection->setOrder(T::TEMPLATE_ID, 'ASC');
+            $templates = array_values(array_map(
+                static fn ($template): array => $template->getData(),
+                $collection->getItems()
+            ));
+            $this->cache->save(
+                json_encode($templates, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE),
+                $cacheKey,
+                [Template::CACHE_TAG],
+                self::CACHE_LIFETIME
+            );
+            if (!$templates) {
+                $this->logDebug('No active templates for entity type', ['entity_type' => $entityType]);
+            }
+        }
+
+        return $this->templateCache[$cacheKey] = $templates;
     }
 
     /**
@@ -275,43 +292,11 @@ class Manager
 
             return true;
         } catch (\Exception $e) {
-            $this->logDebug('Error checking conditions', [
+            $this->logger->warning('[Defox_SEOSuite] MetaTag\\Manager: Error checking conditions', [
                 'error' => $e->getMessage(),
                 'conditions' => $conditionsSerialized
             ]);
             return true; // If conditions are malformed, allow template
         }
-    }
-
-    /**
-     * Clear cache for specific entity
-     *
-     * @param mixed $entity
-     * @param string $entityType
-     * @return void
-     */
-    public function clearCacheForEntity(mixed $entity, string $entityType): void
-    {
-        $storeId = (int)$this->storeManager->getStore()->getId();
-        $entityId = method_exists($entity, 'getId') ? $entity->getId() : spl_object_hash($entity);
-        
-        $templateTypes = ['comprehensive', 'meta_title', 'meta_description', 'meta_keywords', 'meta_robots', 'open_graph'];
-        
-        foreach ($templateTypes as $templateType) {
-            $cacheKey = $this->getCacheKey($entityType, $entityId, $templateType, $storeId);
-            unset($this->processedCache[$cacheKey]);
-            $this->cache->remove($cacheKey);
-        }
-    }
-
-    /**
-     * Clear all meta tag cache
-     *
-     * @return void
-     */
-    public function clearAllCache(): void
-    {
-        $this->processedCache = [];
-        $this->cache->clean(['DEFOX_SEO_METATAG']);
     }
 }

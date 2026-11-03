@@ -5,6 +5,7 @@
  * @copyright   Copyright (c) 2025 deFox
  * @license     GNU General Public License v3.0
  */
+/** @var \Magento\Framework\View\Helper\SecureHtmlRenderer $secureRenderer */
 $warnings = $block->getConfigurationWarnings();
 $stores = $block->getAvailableStores();
 $options = $block->getDefaultOptions();
@@ -123,65 +124,12 @@ $options = $block->getDefaultOptions();
                                 <div class="option-item">
                                     <label class="checkbox-label">
                                         <input type="checkbox" 
-                                               name="force_regeneration" 
-                                               value="1"
-                                               <?= $options['force_regeneration'] ? 'checked' : '' ?> />
-                                        <span class="checkbox-text">
-                                            <strong><?= $block->escapeHtml(__('Force Regeneration')) ?></strong>
-                                            <small class="note"><?= $block->escapeHtml(__('Regenerate even if sitemap files already exist')) ?></small>
-                                        </span>
-                                    </label>
-                                </div>
-                                
-                                <div class="option-item">
-                                    <label class="checkbox-label">
-                                        <input type="checkbox" 
-                                               name="ping_search_engines" 
-                                               value="1"
-                                               <?= $options['ping_search_engines'] ? 'checked' : '' ?>
-                                               <?= $block->canPingSearchEngines() ? '' : 'disabled' ?> />
-                                        <span class="checkbox-text">
-                                            <strong><?= $block->escapeHtml(__('Ping Search Engines')) ?></strong>
-                                            <small class="note"><?= $block->escapeHtml(__('Notify Google and Bing about updated sitemaps')) ?></small>
-                                        </span>
-                                    </label>
-                                </div>
-                                
-                                <div class="option-item">
-                                    <label class="checkbox-label">
-                                        <input type="checkbox" 
                                                name="validate_after_generation" 
                                                value="1"
                                                <?= $options['validate_after_generation'] ? 'checked' : '' ?> />
                                         <span class="checkbox-text">
                                             <strong><?= $block->escapeHtml(__('Validate After Generation')) ?></strong>
                                             <small class="note"><?= $block->escapeHtml(__('Automatically validate generated sitemaps')) ?></small>
-                                        </span>
-                                    </label>
-                                </div>
-                                
-                                <div class="option-item">
-                                    <label class="checkbox-label">
-                                        <input type="checkbox" 
-                                               name="include_images" 
-                                               value="1"
-                                               <?= $options['include_images'] ? 'checked' : '' ?> />
-                                        <span class="checkbox-text">
-                                            <strong><?= $block->escapeHtml(__('Include Images')) ?></strong>
-                                            <small class="note"><?= $block->escapeHtml(__('Add product images to sitemap')) ?></small>
-                                        </span>
-                                    </label>
-                                </div>
-                                
-                                <div class="option-item">
-                                    <label class="checkbox-label">
-                                        <input type="checkbox" 
-                                               name="include_hreflang" 
-                                               value="1"
-                                               <?= $options['include_hreflang'] ? 'checked' : '' ?> />
-                                        <span class="checkbox-text">
-                                            <strong><?= $block->escapeHtml(__('Include Hreflang')) ?></strong>
-                                            <small class="note"><?= $block->escapeHtml(__('Add language alternatives to sitemap')) ?></small>
                                         </span>
                                     </label>
                                 </div>
@@ -345,8 +293,8 @@ $options = $block->getDefaultOptions();
     </div>
 </div>
 
-<script>
-require(['jquery', 'Magento_Ui/js/modal/alert'], function($, alert) {
+<?php ob_start(); try { ?>
+require(['jquery', 'underscore', 'Magento_Ui/js/modal/alert'], function($, _, alert) {
     $(document).ready(function() {
         // Select all stores functionality
         $('#select-all-stores').change(function() {
@@ -445,13 +393,13 @@ require(['jquery', 'Magento_Ui/js/modal/alert'], function($, alert) {
                 var summaryClass = response.success ? 'indicator-success' : 'indicator-error';
                 resultsHtml += '<div class="indicator-item ' + summaryClass + '">';
                 resultsHtml += '<div class="indicator-content">';
-                resultsHtml += '<h4>' + response.message + '</h4>';
+                resultsHtml += '<h4>' + _.escape(response.message) + '</h4>';
                 resultsHtml += '<ul>';
-                resultsHtml += '<li><?= $block->escapeJs(__('Stores processed: ')) ?>' + response.summary.stores_processed + '</li>';
-                resultsHtml += '<li><?= $block->escapeJs(__('Files generated: ')) ?>' + response.summary.files_generated + '</li>';
-                resultsHtml += '<li><?= $block->escapeJs(__('Success rate: ')) ?>' + response.summary.success_rate + '%</li>';
+                resultsHtml += '<li><?= $block->escapeJs(__('Stores processed: ')) ?>' + _.escape(response.summary.stores_processed) + '</li>';
+                resultsHtml += '<li><?= $block->escapeJs(__('Files generated: ')) ?>' + _.escape(response.summary.files_generated) + '</li>';
+                resultsHtml += '<li><?= $block->escapeJs(__('Success rate: ')) ?>' + _.escape(response.summary.success_rate) + '%</li>';
                 if (response.summary.errors_count > 0) {
-                    resultsHtml += '<li><?= $block->escapeJs(__('Errors: ')) ?>' + response.summary.errors_count + '</li>';
+                    resultsHtml += '<li><?= $block->escapeJs(__('Errors: ')) ?>' + _.escape(response.summary.errors_count) + '</li>';
                 }
                 resultsHtml += '</ul>';
                 resultsHtml += '</div></div>';
@@ -482,22 +430,22 @@ require(['jquery', 'Magento_Ui/js/modal/alert'], function($, alert) {
                     var statusText = result.success ? '<?= $block->escapeJs(__('Success')) ?>' : '<?= $block->escapeJs(__('Error')) ?>';
                     
                     resultsHtml += '<tr>';
-                    resultsHtml += '<td>' + result.store_name + ' (' + result.store_id + ')</td>';
+                    resultsHtml += '<td>' + _.escape(result.store_name) + ' (' + _.escape(result.store_id) + ')</td>';
                     resultsHtml += '<td><span class="' + statusClass + '">' + statusText + '</span></td>';
                     
                     if (result.success) {
-                        resultsHtml += '<td>' + result.files_count + ' files';
+                        resultsHtml += '<td>' + _.escape(result.files_count) + ' files';
                         if (result.files && result.files.length > 0) {
-                            resultsHtml += '<br><small>' + result.files.join(', ') + '</small>';
+                            resultsHtml += '<br><small>' + _.escape(result.files.join(', ')) + '</small>';
                         }
                         resultsHtml += '</td>';
-                        resultsHtml += '<td>' + result.duration + 's</td>';
+                        resultsHtml += '<td>' + _.escape(result.duration) + 's</td>';
                     } else {
                         resultsHtml += '<td>-</td>';
                         resultsHtml += '<td>-</td>';
                     }
                     
-                    resultsHtml += '<td>' + result.message + '</td>';
+                    resultsHtml += '<td>' + _.escape(result.message) + '</td>';
                     resultsHtml += '</tr>';
                 });
                 
@@ -514,11 +462,11 @@ require(['jquery', 'Magento_Ui/js/modal/alert'], function($, alert) {
             var errorMessage = '<?= $block->escapeJs(__('Generation failed: ')) ?>';
             
             if (xhr.responseJSON && xhr.responseJSON.message) {
-                errorMessage += xhr.responseJSON.message;
+                errorMessage += _.escape(xhr.responseJSON.message);
             } else if (status === 'timeout') {
                 errorMessage += '<?= $block->escapeJs(__('Request timeout. Generation might still be running in background.')) ?>';
             } else {
-                errorMessage += error || '<?= $block->escapeJs(__('Unknown error occurred')) ?>';
+                errorMessage += _.escape(error) || '<?= $block->escapeJs(__('Unknown error occurred')) ?>';
             }
             
             alert({
@@ -544,11 +492,11 @@ require(['jquery', 'Magento_Ui/js/modal/alert'], function($, alert) {
             robotsInfo += '<div class="robots-txt-example">';
             robotsInfo += '<code style="display: block; background: #f5f5f5; padding: 10px; border-radius: 4px; font-family: monospace; white-space: pre;">';
             <?php $robotsInfo = $block->getRobotsTxtInfo(); ?>
-            robotsInfo += '<?= $block->escapeJs($robotsInfo['robots_content_example']) ?>';
+            robotsInfo += '<?= $block->escapeJs($block->escapeHtml($robotsInfo['robots_content_example'])) ?>';
             robotsInfo += '</code>';
             robotsInfo += '</div>';
             robotsInfo += '<div class="robots-txt-actions" style="margin-top: 10px;">';
-            robotsInfo += '<button type="button" class="action-secondary action-small" onclick="copyRobotsTxtExample()">';
+            robotsInfo += '<button type="button" class="action-secondary action-small defox-copy-robots">';
             robotsInfo += '<span><?= $block->escapeJs(__('Copy to Clipboard')) ?></span>';
             robotsInfo += '</button>';
             robotsInfo += '<small style="margin-left: 10px; color: #666;">';
@@ -585,9 +533,9 @@ require(['jquery', 'Magento_Ui/js/modal/alert'], function($, alert) {
                 content: '<?= $block->escapeJs(__('Robots.txt content copied to clipboard. You can now paste it into your robots.txt file.')) ?>'
             });
         }
-        // Initialize robots.txt info copy functionality  
-        window.copyRobotsTxtExample = copyRobotsTxtExample;
-        window.showCopySuccessMessage = showCopySuccessMessage;
+        // Initialize robots.txt info copy functionality (delegated: no inline handler, CSP-safe)
+        $(document).on('click', '.defox-copy-robots', copyRobotsTxtExample);
     });
 });
-</script>
+<?php } finally { $scriptString = ob_get_clean(); } ?>
+<?= /* @noEscape */ $secureRenderer->renderTag('script', [], $scriptString, false) ?>

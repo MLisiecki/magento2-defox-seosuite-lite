@@ -11,14 +11,9 @@ declare(strict_types=1);
 namespace Defox\SEOSuite\Model\Canonical;
 
 use Defox\SEOSuite\Helper\Config;
-use Defox\SEOSuite\Model\Cache\Type\Canonical as CanonicalCache;
-use Magento\Catalog\Api\ProductRepositoryInterface;
 use Magento\Catalog\Model\Product as CatalogProduct;
-use Magento\Framework\App\Request\Http;
-use Magento\Framework\Exception\NoSuchEntityException;
-use Magento\Framework\UrlInterface;
+use Magento\Catalog\Model\ResourceModel\Category\CollectionFactory as CategoryCollectionFactory;
 use Magento\Store\Model\StoreManagerInterface;
-use Psr\Log\LoggerInterface;
 
 /**
  * Class to handle canonical URLs for product pages
@@ -26,19 +21,9 @@ use Psr\Log\LoggerInterface;
 class Product
 {
     /**
-     * @var Http
-     */
-    private Http $request;
-
-    /**
      * @var Config
      */
     private Config $config;
-
-    /**
-     * @var UrlInterface
-     */
-    private UrlInterface $urlBuilder;
 
     /**
      * @var StoreManagerInterface
@@ -46,112 +31,53 @@ class Product
     private StoreManagerInterface $storeManager;
 
     /**
-     * @var ProductRepositoryInterface
-     */
-    private ProductRepositoryInterface $productRepository;
-    
-    /**
-     * @var LoggerInterface
-     */
-    private LoggerInterface $logger;
-
-    /**
      * @var Exclusion
      */
     private Exclusion $exclusion;
-    
-    /**
-     * @var CanonicalCache
-     */
-    private CanonicalCache $canonicalCache;
 
     /**
-     * @param Http $request
+     * @var CategoryCollectionFactory
+     */
+    private CategoryCollectionFactory $categoryCollectionFactory;
+
+    /**
      * @param Config $config
-     * @param UrlInterface $urlBuilder
      * @param StoreManagerInterface $storeManager
-     * @param ProductRepositoryInterface $productRepository
-     * @param LoggerInterface $logger
      * @param Exclusion $exclusion
-     * @param CanonicalCache $canonicalCache
+     * @param CategoryCollectionFactory $categoryCollectionFactory
      */
     public function __construct(
-        Http $request,
         Config $config,
-        UrlInterface $urlBuilder,
         StoreManagerInterface $storeManager,
-        ProductRepositoryInterface $productRepository,
-        LoggerInterface $logger,
         Exclusion $exclusion,
-        CanonicalCache $canonicalCache
+        CategoryCollectionFactory $categoryCollectionFactory
     ) {
-        $this->request = $request;
         $this->config = $config;
-        $this->urlBuilder = $urlBuilder;
         $this->storeManager = $storeManager;
-        $this->productRepository = $productRepository;
-        $this->logger = $logger;
         $this->exclusion = $exclusion;
-        $this->canonicalCache = $canonicalCache;
+        $this->categoryCollectionFactory = $categoryCollectionFactory;
     }
 
     /**
      * Get canonical URL for product
      *
-     * @param CatalogProduct|null $product
+     * ponytail: computed from the loaded entity on every call, no cache (CR-16) — FPC caches the page.
+     *
+     * @param CatalogProduct $product
      * @return string|null
      */
-    public function getCanonicalUrl(?CatalogProduct $product = null): ?string
+    public function getCanonicalUrl(CatalogProduct $product): ?string
     {
-        // Return null if canonical URLs are disabled for products
-        if (!$this->config->isProductCanonicalEnabled()) {
+        // Return null if the module or canonical URLs for products are disabled
+        if (!$this->config->isEnabled() || !$this->config->isProductCanonicalEnabled()) {
             return null;
         }
 
-        try {
-            if (!$product) {
-                $productId = (int)$this->request->getParam('id');
-                if (!$productId) {
-                    return null;
-                }
-                
-                // Try to get from cache first
-                $cacheKey = 'product_canonical_' . $productId . '_' . $this->storeManager->getStore()->getId();
-                $cachedUrl = $this->canonicalCache->load($cacheKey);
-                
-                if ($cachedUrl !== false) {
-                    return $cachedUrl;
-                }
-                
-                $product = $this->productRepository->getById(
-                    $productId,
-                    false,
-                    $this->storeManager->getStore()->getId()
-                );
-            }
-
-            // Check if product should be excluded from canonical
-            if (!$product || !$product->getId() || $this->exclusion->isProductExcluded($product)) {
-                return null;
-            }
-
-            // Get canonical URL according to configuration
-            $canonicalUrl = $this->getProductCanonicalUrl($product);
-            
-            // Save to cache
-            if ($canonicalUrl) {
-                $cacheKey = 'product_canonical_' . $product->getId() . '_' . $this->storeManager->getStore()->getId();
-                $this->canonicalCache->save($canonicalUrl, $cacheKey, ['product_canonical']);
-            }
-            
-            return $canonicalUrl;
-        } catch (NoSuchEntityException $e) {
-            $this->logger->error(
-                'Error generating canonical URL for product: ' . $e->getMessage(),
-                ['exception' => $e]
-            );
+        if (!$product->getId() || $this->exclusion->isProductExcluded($product)) {
             return null;
         }
+
+        return $this->getProductCanonicalUrl($product);
     }
 
     /**
@@ -165,14 +91,12 @@ class Product
         $canonicalUrlType = $this->config->getProductCanonicalUrlType();
         
         switch ($canonicalUrlType) {
-            case 'product_url':
-                return $this->getProductUrlWithoutParams($product);
             case 'with_category':
-                return $this->getProductUrlWithPrimaryCategory($product);
             case 'shortest_category':
-                return $this->getProductUrlWithShortestCategory($product);
             case 'longest_category':
-                return $this->getProductUrlWithLongestCategory($product);
+                return $this->getProductUrlWithCategory($product, $canonicalUrlType)
+                    ?? $this->getProductUrlWithoutParams($product);
+            case 'product_url':
             default:
                 return $this->getProductUrlWithoutParams($product);
         }
@@ -190,126 +114,54 @@ class Product
     }
 
     /**
-     * Get product URL with primary category
+     * Product URL inside a category path. The category is chosen from one collection query:
+     * "with_category" = first assigned active category in the store tree, "shortest_category"/
+     * "longest_category" = lowest/highest level. The URL comes from core Product\Url::getUrl(), which only
+     * honours a category through the product's category_id with no "_ignore_category" param and looks up
+     * the url_rewrite by metadata.category_id (needs "Use Categories Path for Product URLs" = Yes).
+     * Null when core finds no rewrite for that path.
      *
      * @param CatalogProduct $product
-     * @return string
+     * @param string $mode
+     * @return string|null
      */
-    private function getProductUrlWithPrimaryCategory(CatalogProduct $product): string
+    private function getProductUrlWithCategory(CatalogProduct $product, string $mode): ?string
     {
-        $categoryId = $product->getCategoryId();
-        
-        if (!$categoryId && !empty($product->getCategoryIds())) {
-            $categoryId = $product->getCategoryIds()[0];
-        }
-        
-        if ($categoryId) {
-            return $product->getUrlModel()->getUrl($product, ['_ignore_category' => false, 'category' => $categoryId]);
-        }
-        
-        return $this->getProductUrlWithoutParams($product);
-    }
-
-    /**
-     * Get product URL with shortest category path
-     *
-     * @param CatalogProduct $product
-     * @return string
-     */
-    private function getProductUrlWithShortestCategory(CatalogProduct $product): string
-    {
-        $categoryIds = $product->getCategoryIds();
-        
+        $categoryIds = array_map('intval', (array)$product->getCategoryIds());
         if (empty($categoryIds)) {
-            return $this->getProductUrlWithoutParams($product);
-        }
-        
-        $shortestCategoryId = null;
-        $shortestLength = PHP_INT_MAX;
-        
-        foreach ($categoryIds as $categoryId) {
-            $category = $this->getCategoryById($categoryId);
-            
-            if ($category && $category->getLevel()) {
-                $pathLength = $category->getLevel();
-                
-                if ($pathLength < $shortestLength) {
-                    $shortestLength = $pathLength;
-                    $shortestCategoryId = $categoryId;
-                }
-            }
-        }
-        
-        if ($shortestCategoryId) {
-            return $product->getUrlModel()->getUrl(
-                $product,
-                ['_ignore_category' => false, 'category' => $shortestCategoryId]
-            );
-        }
-        
-        return $this->getProductUrlWithoutParams($product);
-    }
-
-    /**
-     * Get product URL with longest category path
-     *
-     * @param CatalogProduct $product
-     * @return string
-     */
-    private function getProductUrlWithLongestCategory(CatalogProduct $product): string
-    {
-        $categoryIds = $product->getCategoryIds();
-        
-        if (empty($categoryIds)) {
-            return $this->getProductUrlWithoutParams($product);
-        }
-        
-        $longestCategoryId = null;
-        $longestLength = 0;
-        
-        foreach ($categoryIds as $categoryId) {
-            $category = $this->getCategoryById($categoryId);
-            
-            if ($category && $category->getLevel()) {
-                $pathLength = $category->getLevel();
-                
-                if ($pathLength > $longestLength) {
-                    $longestLength = $pathLength;
-                    $longestCategoryId = $categoryId;
-                }
-            }
-        }
-        
-        if ($longestCategoryId) {
-            return $product->getUrlModel()->getUrl(
-                $product,
-                ['_ignore_category' => false, 'category' => $longestCategoryId]
-            );
-        }
-        
-        return $this->getProductUrlWithoutParams($product);
-    }
-
-    /**
-     * Get category by ID
-     *
-     * @param int $categoryId
-     * @return \Magento\Catalog\Model\Category|null
-     */
-    private function getCategoryById(int $categoryId): ?\Magento\Catalog\Model\Category
-    {
-        try {
-            $objectManager = \Magento\Framework\App\ObjectManager::getInstance();
-            $category = $objectManager->create(\Magento\Catalog\Model\Category::class);
-            $category->load($categoryId);
-            
-            return $category->getId() ? $category : null;
-        } catch (\Exception $e) {
-            $this->logger->error(
-                'Error loading category: ' . $e->getMessage(),
-                ['exception' => $e]
-            );
             return null;
         }
+
+        $store = $this->storeManager->getStore();
+        $levels = [];
+        $collection = $this->categoryCollectionFactory->create()
+            ->setStoreId($store->getId())
+            ->addIdFilter($categoryIds)
+            ->addIsActiveFilter()
+            ->addPathsFilter('1/' . (int)$store->getRootCategoryId() . '/');
+        foreach ($collection as $category) {
+            $levels[(int)$category->getId()] = (int)$category->getLevel();
+        }
+        if (empty($levels)) {
+            return null;
+        }
+
+        if ($mode === 'shortest_category') {
+            asort($levels);
+            $categoryId = array_key_first($levels);
+        } elseif ($mode === 'longest_category') {
+            arsort($levels);
+            $categoryId = array_key_first($levels);
+        } else {
+            $categoryId = current(array_intersect($categoryIds, array_keys($levels)));
+        }
+
+        // Clone: core caches the resolved request_path on the product it is given
+        $clone = clone $product;
+        $clone->unsetData('url_data_object');
+        $clone->setRequestPath(null)->setCategoryId($categoryId)->setDoNotUseCategoryId(false);
+        $url = $product->getUrlModel()->getUrl($clone, []);
+
+        return $clone->getRequestPath() ? $url : null;
     }
 }

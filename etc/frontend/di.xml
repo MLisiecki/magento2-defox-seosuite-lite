@@ -16,18 +16,46 @@
         <plugin name="defox_seosuite_noindex_handler" type="Defox\SEOSuite\Plugin\Head\NoindexHandler" sortOrder="200" />
     </type>
     
-    <!-- Filter URL rewrite plugins -->
-    <type name="Magento\Catalog\Model\Layer\Filter\AbstractFilter">
-        <plugin name="defox_seosuite_filter_url_rewrite" type="Defox\SEOSuite\Plugin\Catalog\Layer\FilterUrlRewrite" sortOrder="10" />
+    <!-- Friendly filter URLs: outbound layered-nav links -->
+    <type name="Magento\Catalog\Model\Layer\Filter\Item">
+        <plugin name="defox_seosuite_filter_url_rewrite" type="Defox\SEOSuite\Plugin\Catalog\Layer\FilterItemUrl" sortOrder="10" />
     </type>
-    
-    <!-- Router for friendly URLs -->
-    <type name="Magento\Framework\App\Router\Base">
-        <plugin name="defox_seosuite_friendly_url_router" type="Defox\SEOSuite\Plugin\Framework\App\Router\FilterUrlRouter" sortOrder="10" />
+    <type name="Magento\Swatches\Block\LayeredNavigation\RenderLayered">
+        <plugin name="defox_seosuite_filter_url_rewrite" type="Defox\SEOSuite\Plugin\Catalog\Layer\SwatchFilterUrl" sortOrder="10" />
     </type>
-    
-    <!-- OptimizeSpeed conflict resolution -->
-    <type name="Blueskytechco\OptimizeSpeed\Observer\OptimizeSpeedHttp">
-        <plugin name="defox_seosuite_optimize_speed_fix" type="Defox\SEOSuite\Plugin\Blueskytechco\OptimizeSpeed\Observer\OptimizeSpeedPlugin" sortOrder="100" />
+
+    <!-- Friendly filter URLs: inbound router, before core urlrewrite (sortOrder 20) -->
+    <type name="Magento\Framework\App\RouterList">
+        <arguments>
+            <argument name="routerList" xsi:type="array">
+                <item name="defox_seosuite_filter" xsi:type="array">
+                    <item name="class" xsi:type="string">Defox\SEOSuite\Controller\Router\FilterRouter</item>
+                    <item name="disable" xsi:type="boolean">false</item>
+                    <item name="sortOrder" xsi:type="string">15</item>
+                </item>
+            </argument>
+        </arguments>
+    </type>
+
+    <!-- Meta templates: tag cacheable entity pages so a template save/delete purges them (CR-32).
+         Name keeps core's leading backslash (module-catalog etc/frontend/di.xml) so the XML nodes merge
+         instead of one "preprocessors" argument replacing the other. -->
+    <type name="\Magento\PageCache\Model\PageCacheTagsPreprocessorComposite">
+        <arguments>
+            <argument name="preprocessors" xsi:type="array">
+                <item name="catalog_product_view" xsi:type="array">
+                    <item name="defox_seosuite_meta_template" xsi:type="object">Defox\SEOSuite\Model\MetaTag\PageCacheTags</item>
+                </item>
+                <item name="catalog_category_view" xsi:type="array">
+                    <item name="defox_seosuite_meta_template" xsi:type="object">Defox\SEOSuite\Model\MetaTag\PageCacheTags</item>
+                </item>
+                <item name="cms_page_view" xsi:type="array">
+                    <item name="defox_seosuite_meta_template" xsi:type="object">Defox\SEOSuite\Model\MetaTag\PageCacheTags</item>
+                </item>
+                <item name="cms_index_index" xsi:type="array">
+                    <item name="defox_seosuite_meta_template" xsi:type="object">Defox\SEOSuite\Model\MetaTag\PageCacheTags</item>
+                </item>
+            </argument>
+        </arguments>
     </type>
 </config>

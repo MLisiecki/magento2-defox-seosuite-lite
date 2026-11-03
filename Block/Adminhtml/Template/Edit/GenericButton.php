@@ -11,8 +11,6 @@ declare(strict_types=1);
 namespace Defox\SEOSuite\Block\Adminhtml\Template\Edit;
 
 use Magento\Backend\Block\Widget\Context;
-use Magento\Framework\Exception\NoSuchEntityException;
-use Magento\Framework\Registry;
 
 /**
  * Generic button class for template edit form
@@ -25,20 +23,12 @@ class GenericButton
     protected Context $context;
 
     /**
-     * @var Registry
-     */
-    protected Registry $registry;
-
-    /**
      * @param Context $context
-     * @param Registry $registry
      */
     public function __construct(
-        Context $context,
-        Registry $registry
+        Context $context
     ) {
         $this->context = $context;
-        $this->registry = $registry;
     }
 
     /**
@@ -48,8 +38,9 @@ class GenericButton
      */
     public function getTemplateId(): ?int
     {
-        $template = $this->registry->registry('defox_seosuite_template');
-        return $template ? (int)$template->getId() : null;
+        // Edit controller redirects away when the ID does not resolve, so the param is the loaded template's ID
+        $templateId = (int)$this->context->getRequest()->getParam('template_id');
+        return $templateId > 0 ? $templateId : null;
     }
 
     /**

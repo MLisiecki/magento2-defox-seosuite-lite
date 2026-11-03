@@ -35,19 +35,20 @@ class SchemaValidator implements ValidatorInterface
     private LoggerInterface $logger;
     
     /**
-     * Required fields for different schema types
+     * Required fields for different schema types; a nested list means "at least one of"
      * @var array
      */
     private array $requiredFields = [
-        'Product' => ['name', 'offers'],
+        'Product' => ['name', ['offers', 'review', 'aggregateRating']],
         'Organization' => ['name'],
         'WebSite' => ['name', 'url'],
         'CollectionPage' => ['name'],
         'WebPage' => ['name'],
+        'AboutPage' => ['name'],
         'Article' => ['headline', 'author'],
         'Review' => ['author', 'reviewRating'],
         'Offer' => ['price', 'priceCurrency'],
-        'AggregateRating' => ['ratingValue', 'reviewCount'],
+        'AggregateRating' => ['ratingValue'],
         'Rating' => ['ratingValue']
     ];
     
@@ -58,7 +59,6 @@ class SchemaValidator implements ValidatorInterface
     private array $recommendedFields = [
         'Product' => ['description', 'image', 'sku', 'brand'],
         'Organization' => ['url', 'logo', 'contactPoint'],
-        'WebSite' => ['potentialAction'],
         'Offer' => ['availability', 'url'],
         'Review' => ['reviewBody', 'datePublished']
     ];
@@ -68,12 +68,14 @@ class SchemaValidator implements ValidatorInterface
      * @var array
      */
     private array $validTypes = [
-        'Product', 'Organization', 'WebSite', 'WebPage', 'CollectionPage',
-        'Article', 'BlogPosting', 'Review', 'Offer', 'AggregateRating',
+        'Product', 'Organization', 'WebSite', 'WebPage', 'AboutPage', 'CollectionPage',
+        'Article', 'BlogPosting', 'Review', 'Offer', 'AggregateOffer', 'AggregateRating',
         'Rating', 'Brand', 'PostalAddress', 'ContactPoint', 'SearchAction',
         'EntryPoint', 'Person', 'ListItem', 'BreadcrumbList', 'ItemList',
         'PropertyValue', 'Corporation', 'LocalBusiness', 'Store', 'OnlineStore',
-        'Thing' // Base type for all schema.org entities
+        'ImageObject', 'Thing',
+        'MerchantReturnPolicy', 'OfferShippingDetails', 'MonetaryAmount', 'ShippingDeliveryTime',
+        'QuantitativeValue', 'DefinedRegion'
     ];
     
     /**
@@ -144,8 +146,13 @@ class SchemaValidator implements ValidatorInterface
         // Check required fields
         if (isset($this->requiredFields[$type])) {
             foreach ($this->requiredFields[$type] as $field) {
-                if (!isset($item[$field]) || $this->isEmpty($item[$field])) {
-                    $this->errors[] = $prefix . "Missing required field '$field' for type $type";
+                $present = array_filter(
+                    (array)$field,
+                    fn (string $f): bool => isset($item[$f]) && !$this->isEmpty($item[$f])
+                );
+                if (!$present) {
+                    $this->errors[] = $prefix . "Missing required field '" . implode("' or '", (array)$field)
+                        . "' for type $type";
                 }
             }
         }
@@ -291,9 +298,13 @@ class SchemaValidator implements ValidatorInterface
      */
     private function validateOrganization(array $item, string $prefix): void
     {
-        // Validate logo
-        if (isset($item['logo']) && !empty($item['logo']) && !$this->isValidUrl((string)$item['logo'])) {
-            $this->warnings[] = $prefix . 'Invalid logo URL';
+        // Validate logo (can be URL string or ImageObject)
+        if (isset($item['logo'])) {
+            if (is_string($item['logo']) && !empty($item['logo']) && !$this->isValidUrl($item['logo'])) {
+                $this->warnings[] = $prefix . 'Invalid logo URL';
+            } elseif (is_array($item['logo']) && isset($item['logo']['url']) && !$this->isValidUrl((string)$item['logo']['url'])) {
+                $this->warnings[] = $prefix . 'Invalid logo URL in ImageObject';
+            }
         }
         
         // Validate URL
@@ -392,7 +403,7 @@ class SchemaValidator implements ValidatorInterface
         try {
             return filter_var($url, FILTER_VALIDATE_URL) !== false;
         } catch (\Exception $e) {
-            $this->logger->debug('Error validating URL: ' . $e->getMessage());
+            $this->logger->warning('Error validating URL: ' . $e->getMessage());
             return false;
         }
     }

@@ -11,20 +11,18 @@ declare(strict_types=1);
 namespace Defox\SEOSuite\Model\StructuredData\Mapper;
 
 use Defox\SEOSuite\Helper\Config;
+use Defox\SEOSuite\Model\Text\Cleaner;
 use Magento\Catalog\Model\Product;
 use Magento\Catalog\Model\ResourceModel\Eav\Attribute;
 use Magento\Eav\Model\Config as EavConfig;
-use Magento\Framework\Exception\NoSuchEntityException;
 use Magento\Framework\Serialize\SerializerInterface;
-use Magento\Swatches\Helper\Data as SwatchHelper;
-use Magento\Swatches\Model\Swatch;
 use Psr\Log\LoggerInterface;
 
 /**
  * Attribute mapper implementation
  * 
  * Maps Magento attributes to schema.org fields based on configuration.
- * Handles different attribute types including swatches, select, multiselect, text, etc.
+ * Handles different attribute types (select incl. swatch attributes, multiselect, text, etc.).
  */
 class AttributeMapper implements AttributeMapperInterface
 {
@@ -49,10 +47,10 @@ class AttributeMapper implements AttributeMapperInterface
     private EavConfig $eavConfig;
     
     /**
-     * @var SwatchHelper
+     * @var Cleaner
      */
-    private SwatchHelper $swatchHelper;
-    
+    private Cleaner $textCleaner;
+
     /**
      * @var array
      */
@@ -70,20 +68,20 @@ class AttributeMapper implements AttributeMapperInterface
      * @param SerializerInterface $serializer
      * @param LoggerInterface $logger
      * @param EavConfig $eavConfig
-     * @param SwatchHelper $swatchHelper
+     * @param Cleaner $textCleaner
      */
     public function __construct(
         Config $configHelper,
         SerializerInterface $serializer,
         LoggerInterface $logger,
         EavConfig $eavConfig,
-        SwatchHelper $swatchHelper
+        Cleaner $textCleaner
     ) {
         $this->configHelper = $configHelper;
         $this->serializer = $serializer;
         $this->logger = $logger;
         $this->eavConfig = $eavConfig;
-        $this->swatchHelper = $swatchHelper;
+        $this->textCleaner = $textCleaner;
     }
     
     /**
@@ -135,10 +133,6 @@ class AttributeMapper implements AttributeMapperInterface
         
         $attributeCode = $mappings[$schemaField];
         
-        if ($schemaField === 'color') {
-            $this->logger->info("Processing color attribute: {$attributeCode}");
-        }
-        
         try {
             // Check if entity has the method to get data
             if (!method_exists($entity, 'getData')) {
@@ -148,10 +142,6 @@ class AttributeMapper implements AttributeMapperInterface
             // Get raw attribute value
             $value = $entity->getData($attributeCode);
             
-            if ($schemaField === 'color') {
-                $this->logger->info("Raw color value: " . json_encode($value));
-            }
-            
             // If no value, return null early
             if ($value === null || $value === '' || $value === false) {
                 return null;
@@ -160,37 +150,24 @@ class AttributeMapper implements AttributeMapperInterface
             // Get attribute object for proper processing
             $attribute = $this->getAttributeObject($entityType, $attributeCode);
             
-            if ($schemaField === 'color') {
-                $this->logger->info("Color attribute object: " . ($attribute ? $attribute->getFrontendInput() : 'null'));
-            }
-            
             if ($attribute) {
-                // Process value based on attribute type
-                $processedValue = $this->processAttributeValue($entity, $attribute, $value);
-                if ($processedValue !== null) {
-                    if ($schemaField === 'color') {
-                        $this->logger->info("Processed color value: " . json_encode($processedValue));
-                    }
-                    return $processedValue;
-                }
+                // The type processor decides: null = no publishable value (no raw option ids or raw HTML)
+                return $this->processAttributeValue($entity, $attribute, $value);
             }
             
             // Fallback: try to get attribute text for select/multiselect attributes
             if (method_exists($entity, 'getAttributeText')) {
-                $textValue = $entity->getAttributeText($attributeCode);
-                if ($schemaField === 'color') {
-                    $this->logger->info("Color text value: " . json_encode($textValue));
-                }
-                if ($textValue !== false && $textValue !== null && $textValue !== '') {
+                $textValue = $this->toText($entity->getAttributeText($attributeCode));
+                if ($textValue !== null) {
                     return $textValue;
                 }
             }
             
-            // Return raw value as last resort
-            return $value;
+            // Return raw value as last resort (arrays collapsed to one Text value)
+            return is_array($value) ? $this->toText($value) : $value;
             
         } catch (\Exception $e) {
-            $this->logger->debug(
+            $this->logger->warning(
                 sprintf(
                     'Error getting mapped value for %s.%s (attribute: %s): %s',
                     $entityType,
@@ -268,7 +245,7 @@ class AttributeMapper implements AttributeMapperInterface
             return $attribute;
             
         } catch (\Exception $e) {
-            $this->logger->debug("Error loading attribute {$entityType}.{$attributeCode}: " . $e->getMessage());
+            $this->logger->warning("Error loading attribute {$entityType}.{$attributeCode}: " . $e->getMessage());
             $this->attributeCache[$cacheKey] = null;
             return null;
         }
@@ -295,10 +272,6 @@ class AttributeMapper implements AttributeMapperInterface
                 case 'multiselect':
                     return $this->processMultiselectAttribute($entity, $attribute, $value);
                     
-                case 'swatch_visual':
-                case 'swatch_text':
-                    return $this->processSwatchAttribute($entity, $attribute, $value);
-                    
                 case 'boolean':
                     return $this->processBooleanAttribute($value);
                     
@@ -312,7 +285,7 @@ class AttributeMapper implements AttributeMapperInterface
                     return $this->processTextAttribute($value);
             }
         } catch (\Exception $e) {
-            $this->logger->debug(
+            $this->logger->warning(
                 "Error processing {$frontendInput} attribute {$attributeCode}: " . $e->getMessage()
             );
             return null;
@@ -330,9 +303,9 @@ class AttributeMapper implements AttributeMapperInterface
     private function processSelectAttribute($entity, Attribute $attribute, $value): ?string
     {
         if (method_exists($entity, 'getAttributeText')) {
-            $textValue = $entity->getAttributeText($attribute->getAttributeCode());
-            if ($textValue !== false && $textValue !== null && $textValue !== '') {
-                return is_string($textValue) ? $textValue : (string)$textValue;
+            $textValue = $this->toText($entity->getAttributeText($attribute->getAttributeCode()));
+            if ($textValue !== null) {
+                return $textValue;
             }
         }
         
@@ -348,10 +321,10 @@ class AttributeMapper implements AttributeMapperInterface
                 }
             }
         } catch (\Exception $e) {
-            $this->logger->debug('Error getting attribute source options: ' . $e->getMessage());
+            $this->logger->warning('Error getting attribute source options: ' . $e->getMessage());
         }
         
-        return is_string($value) ? $value : (string)$value;
+        return null; // no label: never publish the raw option id
     }
     
     /**
@@ -360,25 +333,20 @@ class AttributeMapper implements AttributeMapperInterface
      * @param mixed $entity
      * @param Attribute $attribute
      * @param mixed $value
-     * @return array|null
+     * @return string|null Labels joined with ", " (schema.org Text, emitted once)
      */
-    private function processMultiselectAttribute($entity, Attribute $attribute, $value): ?array
+    private function processMultiselectAttribute($entity, Attribute $attribute, $value): ?string
     {
         if (method_exists($entity, 'getAttributeText')) {
-            $textValue = $entity->getAttributeText($attribute->getAttributeCode());
-            if ($textValue !== false && $textValue !== null) {
-                if (is_array($textValue)) {
-                    return $textValue;
-                }
-                if (is_string($textValue)) {
-                    return explode(',', $textValue);
-                }
+            $textValue = $this->toText($entity->getAttributeText($attribute->getAttributeCode()));
+            if ($textValue !== null) {
+                return $textValue;
             }
         }
         
-        // Process comma-separated values
-        if (is_string($value)) {
-            $valueIds = explode(',', $value);
+        // Process option IDs (comma-separated string or array)
+        if (is_string($value) || is_array($value)) {
+            $valueIds = is_array($value) ? $value : explode(',', $value);
             $labels = [];
             
             try {
@@ -396,58 +364,37 @@ class AttributeMapper implements AttributeMapperInterface
                     }
                 }
             } catch (\Exception $e) {
-                $this->logger->debug('Error getting multiselect attribute options: ' . $e->getMessage());
+                $this->logger->warning('Error getting multiselect attribute options: ' . $e->getMessage());
             }
             
-            return !empty($labels) ? $labels : null;
+            return $this->toText($labels);
         }
         
-        return is_array($value) ? $value : null;
+        return null;
     }
     
     /**
-     * Process swatch attribute (visual or text swatch)
+     * Collapse a getAttributeText()-style result (string|array|false|null) into one Text value
      *
-     * @param mixed $entity
-     * @param Attribute $attribute
+     * schema.org Text properties (material, color, size, category...) must appear once per
+     * Product; Google reads a JSON array as a repeated field ("Duplicated field").
+     *
      * @param mixed $value
-     * @return string|null
+     * @return string|null Non-empty parts joined with ", ", or null when nothing is left
      */
-    private function processSwatchAttribute($entity, Attribute $attribute, $value): ?string
+    private function toText($value): ?string
     {
-        try {
-            // For products, try to get swatch data
-            if ($entity instanceof Product) {
-                $swatchData = $this->swatchHelper->getSwatchAttributeImage(
-                    $attribute->getAttributeCode(),
-                    $value
-                );
-                
-                if ($swatchData && isset($swatchData['value'])) {
-                    return (string)$swatchData['value'];
+        $parts = [];
+        foreach (is_array($value) ? $value : [$value] as $part) {
+            if (is_scalar($part) || $part instanceof \Stringable) {
+                $part = trim((string)$part);
+                if ($part !== '') {
+                    $parts[] = $part;
                 }
             }
-            
-            // Try to get swatch collection for the attribute
-            $swatches = $this->swatchHelper->getSwatchesByOptionsId([$value]);
-            if (isset($swatches[$value])) {
-                $swatch = $swatches[$value];
-                if ($swatch['type'] == Swatch::SWATCH_TYPE_TEXTUAL && !empty($swatch['value'])) {
-                    return (string)$swatch['value'];
-                }
-            }
-            
-            // Fallback to regular select processing
-            return $this->processSelectAttribute($entity, $attribute, $value);
-            
-        } catch (\Exception $e) {
-            $this->logger->debug(
-                "Error processing swatch attribute {$attribute->getAttributeCode()}: " . $e->getMessage()
-            );
-            
-            // Fallback to regular select processing
-            return $this->processSelectAttribute($entity, $attribute, $value);
         }
+        
+        return $parts !== [] ? implode(', ', $parts) : null;
     }
     
     /**
@@ -499,7 +446,7 @@ class AttributeMapper implements AttributeMapperInterface
             $date = new \DateTime($value);
             return $date->format('Y-m-d');
         } catch (\Exception $e) {
-            return is_string($value) ? $value : null;
+            return null; // unparseable date is not publishable
         }
     }
     
@@ -515,13 +462,13 @@ class AttributeMapper implements AttributeMapperInterface
             return null;
         }
         
-        // Handle arrays (like category_ids) - don't process them as text
+        // Arrays (category_ids): one Text value; Product generator swaps category ids for names
         if (is_array($value)) {
-            return null;
+            return $this->toText($value);
         }
         
         $stringValue = is_string($value) ? $value : (string)$value;
-        $cleanValue = trim(strip_tags($stringValue));
+        $cleanValue = trim($this->textCleaner->clean($stringValue));
         
         return $cleanValue !== '' ? $cleanValue : null;
     }
@@ -557,9 +504,7 @@ class AttributeMapper implements AttributeMapperInterface
                     'material' => 'material',
                     'size' => 'size',
                     'weight' => 'weight',
-                    'width' => 'width',
-                    'height' => 'height',
-                    'depth' => 'depth',
+                    // width/height/depth not mapped: schema.org wants QuantitativeValue with a unit, none is known
                     'manufacturer' => 'manufacturer',
                     'countryOfOrigin' => 'country_of_manufacture',
                     'releaseDate' => 'news_from_date',

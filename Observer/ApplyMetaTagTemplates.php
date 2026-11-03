@@ -10,25 +10,22 @@ declare(strict_types=1);
 
 namespace Defox\SEOSuite\Observer;
 
+use Defox\SEOSuite\Helper\Config;
+use Defox\SEOSuite\Helper\StructuredDataManager;
 use Defox\SEOSuite\Model\MetaTag\Manager;
 use Magento\Catalog\Model\Product;
 use Magento\Catalog\Model\Category;
 use Magento\Cms\Model\Page;
 use Magento\Framework\Event\Observer;
 use Magento\Framework\Event\ObserverInterface;
-use Magento\Framework\Registry;
-use Magento\Framework\App\RequestInterface;
-use Magento\Cms\Api\PageRepositoryInterface;
-use Magento\Catalog\Api\ProductRepositoryInterface;
-use Magento\Catalog\Api\CategoryRepositoryInterface;
 use Psr\Log\LoggerInterface;
 use Magento\Framework\View\Page\Config as PageConfig;
 
 /**
  * Enhanced observer for applying meta tag templates
  *
- * This observer listens to the 'layout_generate_blocks_after' event
- * and applies meta tag templates to the page with improved entity detection
+ * Listens to 'layout_render_before' (frontend) and applies meta tag templates to the page entity resolved by
+ * StructuredDataManager::getCurrentEntity(), so meta tags and JSON-LD always describe the same entity
  */
 class ApplyMetaTagTemplates implements ObserverInterface
 {
@@ -38,29 +35,9 @@ class ApplyMetaTagTemplates implements ObserverInterface
     private Manager $metaTagManager;
 
     /**
-     * @var Registry
+     * @var StructuredDataManager
      */
-    private Registry $registry;
-
-    /**
-     * @var RequestInterface
-     */
-    private RequestInterface $request;
-
-    /**
-     * @var PageRepositoryInterface
-     */
-    private PageRepositoryInterface $pageRepository;
-
-    /**
-     * @var ProductRepositoryInterface
-     */
-    private ProductRepositoryInterface $productRepository;
-
-    /**
-     * @var CategoryRepositoryInterface
-     */
-    private CategoryRepositoryInterface $categoryRepository;
+    private StructuredDataManager $structuredDataManager;
 
     /**
      * @var LoggerInterface
@@ -73,43 +50,29 @@ class ApplyMetaTagTemplates implements ObserverInterface
     private PageConfig $pageConfig;
 
     /**
-     * @var array
+     * @var Config
      */
-    private static array $appliedRequests = [];
-
-    /**
-     * @var array
-     */
-    private array $entityCache = [];
+    private Config $config;
 
     /**
      * @param Manager $metaTagManager
-     * @param Registry $registry
-     * @param RequestInterface $request
-     * @param PageRepositoryInterface $pageRepository
-     * @param ProductRepositoryInterface $productRepository
-     * @param CategoryRepositoryInterface $categoryRepository
+     * @param StructuredDataManager $structuredDataManager
      * @param LoggerInterface $logger
      * @param PageConfig $pageConfig
+     * @param Config $config
      */
     public function __construct(
         Manager $metaTagManager,
-        Registry $registry,
-        RequestInterface $request,
-        PageRepositoryInterface $pageRepository,
-        ProductRepositoryInterface $productRepository,
-        CategoryRepositoryInterface $categoryRepository,
+        StructuredDataManager $structuredDataManager,
         LoggerInterface $logger,
-        PageConfig $pageConfig
+        PageConfig $pageConfig,
+        Config $config
     ) {
         $this->metaTagManager = $metaTagManager;
-        $this->registry = $registry;
-        $this->request = $request;
-        $this->pageRepository = $pageRepository;
-        $this->productRepository = $productRepository;
-        $this->categoryRepository = $categoryRepository;
+        $this->structuredDataManager = $structuredDataManager;
         $this->logger = $logger;
         $this->pageConfig = $pageConfig;
+        $this->config = $config;
     }
 
     /**
@@ -117,15 +80,13 @@ class ApplyMetaTagTemplates implements ObserverInterface
      */
     public function execute(Observer $observer): void
     {
-        $requestKey = $this->request->getRequestUri();
-
-        // Prevent multiple executions per request
-        if (isset(self::$appliedRequests[$requestKey])) {
+        // Current store scope (null = current store)
+        if (!$this->config->isEnabled() || !$this->config->isMetaTagsEnabled()) {
             return;
         }
 
         try {
-            $entity = $this->getCurrentEntity();
+            $entity = $this->structuredDataManager->getCurrentEntity();
             $entityType = $this->getEntityType($entity);
 
             if (!$entity || !$entityType) {
@@ -140,17 +101,50 @@ class ApplyMetaTagTemplates implements ObserverInterface
             }
 
             // Apply meta tags to page config
-            $this->applyMetaTagsToPageConfig($metaTags);
-
-            // Mark as applied
-            self::$appliedRequests[$requestKey] = true;
-
-        } catch (\Exception $e) {
-        $this->logger->error('[Defox_SEOSuite] ApplyMetaTagTemplates: Error', [
-            'error' => $e->getMessage(),
-            'trace' => $e->getTraceAsString()
-        ]);
+            $this->applyMetaTagsToPageConfig($this->filterByOverrideSettings($metaTags, $entity));
+        } catch (\Throwable $e) {
+            $this->logger->error('[Defox_SEOSuite] ApplyMetaTagTemplates: ' . $e->getMessage(), [
+                'exception' => $e
+            ]);
+        }
     }
+
+    /**
+     * Drop meta title/description/keywords the store's override settings protect (CR-08)
+     *
+     * A field is applied when the entity's own value is empty; a non-empty value is replaced only when
+     * "Override Only Empty" is No and the per-field override flag is Yes (both need "Enable Meta Tags Override").
+     *
+     * @param array $metaTags
+     * @param mixed $entity
+     * @return array
+     */
+    private function filterByOverrideSettings(array $metaTags, $entity): array
+    {
+        $existing = [
+            'meta_title' => $entity->getData('meta_title'),
+            'meta_description' => $entity->getData('meta_description'),
+            // product: meta_keyword; category / CMS page: meta_keywords
+            'meta_keywords' => $entity->getData('meta_keywords') ?: $entity->getData('meta_keyword'),
+        ];
+
+        foreach ($existing as $field => $value) {
+            if (!isset($metaTags[$field]) || !is_scalar($value) || trim((string)$value) === '') {
+                continue;
+            }
+
+            $override = !$this->config->shouldOverrideOnlyEmptyMetaTags() && match ($field) {
+                'meta_title' => $this->config->shouldOverrideMetaTitle(),
+                'meta_description' => $this->config->shouldOverrideMetaDescription(),
+                'meta_keywords' => $this->config->shouldOverrideMetaKeywords(),
+            };
+
+            if (!$override) {
+                unset($metaTags[$field]);
+            }
+        }
+
+        return $metaTags;
     }
 
     /**
@@ -197,152 +191,6 @@ class ApplyMetaTagTemplates implements ObserverInterface
         if (isset($metaTags['og_image']) && !empty($metaTags['og_image'])) {
             $this->pageConfig->setMetadata('og:image', $metaTags['og_image']);
         }
-    }
-
-    /**
-     * Get current entity with improved detection
-     *
-     * @return mixed|null
-     */
-    private function getCurrentEntity()
-    {
-        $fullActionName = $this->request->getFullActionName();
-        $cacheKey = $fullActionName . '_' . serialize($this->request->getParams());
-
-        // Check cache first
-        if (isset($this->entityCache[$cacheKey])) {
-            return $this->entityCache[$cacheKey];
-        }
-
-        $entity = null;
-
-        // Try to get product
-        $entity = $this->getProductEntity($fullActionName);
-        if ($entity) {
-            $this->entityCache[$cacheKey] = $entity;
-            return $entity;
-        }
-
-        // Try to get category
-        $entity = $this->getCategoryEntity($fullActionName);
-        if ($entity) {
-            $this->entityCache[$cacheKey] = $entity;
-            return $entity;
-        }
-
-        // Try to get CMS page
-        $entity = $this->getCmsPageEntity($fullActionName);
-        if ($entity) {
-            $this->entityCache[$cacheKey] = $entity;
-            return $entity;
-        }
-
-        $this->entityCache[$cacheKey] = null;
-        return null;
-    }
-
-    /**
-     * Get product entity
-     *
-     * @param string $fullActionName
-     * @return Product|null
-     */
-    private function getProductEntity(string $fullActionName): ?Product
-    {
-        // Try registry first
-        $product = $this->registry->registry('current_product');
-        if ($product instanceof Product && $product->getId()) {
-            return $product;
-        }
-
-        // Check if this is a product-related action
-        if ($fullActionName === 'catalog_product_view' ||
-            strpos($fullActionName, 'product') !== false) {
-
-            $productId = $this->request->getParam('id');
-            if ($productId) {
-                try {
-                    $product = $this->productRepository->getById($productId);
-                    return $product;
-                } catch (\Exception $e) {
-                    $this->logger->debug('[Defox_SEOSuite] ApplyMetaTagTemplates: Could not load product', [
-                        'product_id' => $productId,
-                        'error' => $e->getMessage()
-                    ]);
-                }
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * Get category entity
-     *
-     * @param string $fullActionName
-     * @return Category|null
-     */
-    private function getCategoryEntity(string $fullActionName): ?Category
-    {
-        // Try registry first
-        $category = $this->registry->registry('current_category');
-        if ($category instanceof Category && $category->getId()) {
-            return $category;
-        }
-
-        // Check if this is a category-related action
-        if ($fullActionName === 'catalog_category_view' ||
-            strpos($fullActionName, 'category') !== false) {
-
-            $categoryId = $this->request->getParam('id');
-            if ($categoryId) {
-                try {
-                    $category = $this->categoryRepository->get($categoryId);
-                    return $category;
-                } catch (\Exception $e) {
-                    $this->logger->debug('[Defox_SEOSuite] ApplyMetaTagTemplates: Could not load category', [
-                        'category_id' => $categoryId,
-                        'error' => $e->getMessage()
-                    ]);
-                }
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * Get CMS page entity
-     *
-     * @param string $fullActionName
-     * @return Page|null
-     */
-    private function getCmsPageEntity(string $fullActionName): ?Page
-    {
-        // Try registry first
-        $page = $this->registry->registry('cms_page');
-        if ($page instanceof Page && $page->getId()) {
-            return $page;
-        }
-
-        // Check if this is a CMS page action
-        if ($fullActionName === 'cms_page_view' || $fullActionName === 'cms_index_index') {
-            $pageId = $this->request->getParam('page_id') ?: $this->request->getParam('id');
-
-            if ($pageId) {
-                try {
-                    $page = $this->pageRepository->getById($pageId);
-                    return $page;
-                } catch (\Exception $e) {
-                    $this->logger->debug('[Defox_SEOSuite] ApplyMetaTagTemplates: Could not load CMS page', [
-                        'page_id' => $pageId,
-                        'error' => $e->getMessage()
-                    ]);
-                }
-            }
-        }
-
-        return null;
     }
 
     /**

@@ -31,11 +31,11 @@ class FriendlyUrlPattern implements OptionSourceInterface
         return [
             [
                 'value' => self::PATTERN_PATH,
-                'label' => __('Path Based (category/filter-price-10-20/color-red/)')
+                'label' => __('Path Based (category/color-red/size-m.html)')
             ],
             [
                 'value' => self::PATTERN_QUERY,
-                'label' => __('Query Based (category?price=10-20&color=red)')
+                'label' => __('Query Based, Magento default (category.html?color=12&size=34)')
             ]
         ];
     }

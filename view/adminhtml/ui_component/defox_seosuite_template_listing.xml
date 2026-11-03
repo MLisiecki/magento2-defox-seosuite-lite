@@ -2,7 +2,7 @@
 <!--
 /**
  * @package     Defox_SEOSuite
- * @copyright   Copyright (c) 2024 Defox (https://defox.com)
+ * @copyright   Copyright (c) 2024 Defox (https://defox.pl)
  * @license     Defox Proprietary License
  */
 -->
@@ -18,6 +18,7 @@
                 <url path="*/*/new"/>
                 <class>primary</class>
                 <label translate="true">Add New Template</label>
+                <aclResource>Defox_SEOSuite::template_save</aclResource>
             </button>
         </buttons>
         <spinner>defox_seosuite_template_columns</spinner>
@@ -49,7 +50,7 @@
         <filterSearch name="fulltext"/>
         <filters name="listing_filters"/>
         <paging name="listing_paging"/>
-        <massaction name="listing_massaction">
+        <massaction name="listing_massaction" class="Defox\SEOSuite\Ui\Component\Listing\MassAction">
             <action name="delete">
                 <settings>
                     <confirm>

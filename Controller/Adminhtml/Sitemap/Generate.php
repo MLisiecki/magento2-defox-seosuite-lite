@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace Defox\SEOSuite\Controller\Adminhtml\Sitemap;
 
 use Defox\SEOSuite\Helper\Config;
+use Defox\SEOSuite\Model\SafeErrorMessage;
 use Defox\SEOSuite\Model\Sitemap\Analytics\StatisticsManager;
 use Defox\SEOSuite\Model\Sitemap\SitemapGeneratorInterface;
 use Magento\Backend\App\Action;
@@ -20,6 +21,7 @@ use Magento\Framework\Controller\Result\JsonFactory;
 use Magento\Framework\Controller\ResultInterface;
 use Magento\Framework\View\Result\PageFactory;
 use Magento\Store\Model\StoreManagerInterface;
+use Psr\Log\LoggerInterface;
 
 /**
  * Sitemap generation controller
@@ -68,6 +70,16 @@ class Generate extends Action implements HttpGetActionInterface, HttpPostActionI
     private StatisticsManager $statisticsManager;
 
     /**
+     * @var SafeErrorMessage
+     */
+    private SafeErrorMessage $safeErrorMessage;
+
+    /**
+     * @var LoggerInterface
+     */
+    private LoggerInterface $logger;
+
+    /**
      * Constructor
      *
      * @param Context $context
@@ -77,6 +89,8 @@ class Generate extends Action implements HttpGetActionInterface, HttpPostActionI
      * @param SitemapGeneratorInterface $sitemapGenerator
      * @param StoreManagerInterface $storeManager
      * @param StatisticsManager $statisticsManager
+     * @param SafeErrorMessage $safeErrorMessage
+     * @param LoggerInterface $logger
      */
     public function __construct(
         Context $context,
@@ -85,7 +99,9 @@ class Generate extends Action implements HttpGetActionInterface, HttpPostActionI
         Config $config,
         SitemapGeneratorInterface $sitemapGenerator,
         StoreManagerInterface $storeManager,
-        StatisticsManager $statisticsManager
+        StatisticsManager $statisticsManager,
+        SafeErrorMessage $safeErrorMessage,
+        LoggerInterface $logger
     ) {
         parent::__construct($context);
         $this->resultPageFactory = $resultPageFactory;
@@ -94,6 +110,8 @@ class Generate extends Action implements HttpGetActionInterface, HttpPostActionI
         $this->sitemapGenerator = $sitemapGenerator;
         $this->storeManager = $storeManager;
         $this->statisticsManager = $statisticsManager;
+        $this->safeErrorMessage = $safeErrorMessage;
+        $this->logger = $logger;
     }
 
     /**
@@ -166,8 +184,7 @@ class Generate extends Action implements HttpGetActionInterface, HttpPostActionI
                     $duration = microtime(true) - $startTime;
                     $memoryAfter = memory_get_usage();
                     
-                    // Calculate URL count from files
-                    $totalUrls = $this->calculateUrlCount($files);
+                    $totalUrls = (int)($this->sitemapGenerator->getGenerationStats()['total_urls'] ?? 0);
                     
                     // Record statistics
                     $this->recordStatistics([
@@ -195,11 +212,12 @@ class Generate extends Action implements HttpGetActionInterface, HttpPostActionI
                     
                 } catch (\Exception $e) {
                     $store = $this->storeManager->getStore($storeId);
+                    $safeMessage = $this->safeErrorMessage->get($e);
                     $errorMessage = sprintf(
                         'Store %s (%d): %s',
                         $store->getName(),
                         $storeId,
-                        $e->getMessage()
+                        $safeMessage
                     );
                     $errors[] = $errorMessage;
                     
@@ -209,7 +227,7 @@ class Generate extends Action implements HttpGetActionInterface, HttpPostActionI
                         'duration' => 0,
                         'total_urls' => 0,
                         'files' => [],
-                        'errors' => [$e->getMessage()],
+                        'errors' => [$safeMessage],
                         'success' => false
                     ]);
                     
@@ -217,8 +235,8 @@ class Generate extends Action implements HttpGetActionInterface, HttpPostActionI
                         'store_id' => $storeId,
                         'store_name' => $store->getName(),
                         'success' => false,
-                        'error' => $e->getMessage(),
-                        'message' => __('Error generating sitemap: %1', $e->getMessage())
+                        'error' => $safeMessage,
+                        'message' => __('Error generating sitemap: %1', $safeMessage)
                     ];
                 }
             }
@@ -241,10 +259,11 @@ class Generate extends Action implements HttpGetActionInterface, HttpPostActionI
             ]);
             
         } catch (\Exception $e) {
+            $safeMessage = $this->safeErrorMessage->get($e);
             return $result->setData([
                 'success' => false,
-                'message' => __('Fatal error during generation: %1', $e->getMessage()),
-                'error' => $e->getMessage()
+                'message' => __('Fatal error during generation: %1', $safeMessage),
+                'error' => $safeMessage
             ]);
         }
     }
@@ -257,11 +276,7 @@ class Generate extends Action implements HttpGetActionInterface, HttpPostActionI
     private function getGenerationOptions(): array
     {
         return [
-            'force_regeneration' => (bool)$this->getRequest()->getParam('force_regeneration', false),
-            'ping_search_engines' => (bool)$this->getRequest()->getParam('ping_search_engines', true),
-            'validate_after_generation' => (bool)$this->getRequest()->getParam('validate_after_generation', false),
-            'include_images' => (bool)$this->getRequest()->getParam('include_images', true),
-            'include_hreflang' => (bool)$this->getRequest()->getParam('include_hreflang', true)
+            'validate_after_generation' => (bool)$this->getRequest()->getParam('validate_after_generation', false)
         ];
     }
 
@@ -274,62 +289,10 @@ class Generate extends Action implements HttpGetActionInterface, HttpPostActionI
     private function recordStatistics(array $stats): void
     {
         try {
-            // Ensure table exists before recording
-            $this->ensureStatisticsTableExists();
             $this->statisticsManager->recordGenerationStats($stats);
         } catch (\Exception $e) {
             // Don't fail generation if statistics recording fails
-            // Just log the error silently
+            $this->logger->warning('Defox_SEOSuite: sitemap statistics not recorded: ' . $e->getMessage());
         }
-    }
-
-    /**
-     * Ensure statistics table exists
-     *
-     * @return void
-     */
-    private function ensureStatisticsTableExists(): void
-    {
-        try {
-            $objectManager = \Magento\Framework\App\ObjectManager::getInstance();
-            $resourceConnection = $objectManager->get(\Magento\Framework\App\ResourceConnection::class);
-            $connection = $resourceConnection->getConnection();
-            $tableName = $resourceConnection->getTableName('defox_seosuite_sitemap_stats');
-            
-            if (!$connection->isTableExists($tableName)) {
-                // Create table if it doesn't exist
-                $setupPatch = $objectManager->get(\Defox\SEOSuite\Setup\Patch\Schema\CreateSitemapStatisticsTable::class);
-                $setupPatch->apply();
-            }
-        } catch (\Exception $e) {
-            // If we can't create table, skip statistics
-        }
-    }
-
-    /**
-     * Calculate total URL count from generated files
-     *
-     * @param array $files
-     * @return int
-     */
-    private function calculateUrlCount(array $files): int
-    {
-        $totalUrls = 0;
-        
-        foreach ($files as $file) {
-            if (file_exists($file) && is_readable($file)) {
-                try {
-                    $content = file_get_contents($file);
-                    // Count <url> tags in XML files
-                    $urlCount = substr_count($content, '<url>');
-                    $totalUrls += $urlCount;
-                } catch (\Exception $e) {
-                    // If we can't read the file, skip counting
-                    continue;
-                }
-            }
-        }
-        
-        return $totalUrls;
     }
 }

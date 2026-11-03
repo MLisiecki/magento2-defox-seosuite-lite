@@ -78,7 +78,7 @@ class DataProvider extends AbstractDataProvider
 
         $data = $this->dataPersistor->get('defox_seosuite_template');
         if (!empty($data)) {
-            $templateId = isset($data['template_id']) ? $data['template_id'] : null;
+            $templateId = $data['template_id'] ?? '';
             $this->loadedData[$templateId] = $data;
             $this->dataPersistor->clear('defox_seosuite_template');
         }

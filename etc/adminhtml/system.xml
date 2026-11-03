@@ -12,7 +12,7 @@
         xsi:noNamespaceSchemaLocation="urn:magento:module:Magento_Config:etc/system_file.xsd">
     <system>
         <tab id="defox" translate="label" sortOrder="1000">
-            <label>Defox</label>
+            <label>DEFOX</label>
         </tab>
         <section id="defox_seosuite" translate="label" type="text" sortOrder="100" showInDefault="1" showInWebsite="1"
                  showInStore="1">
@@ -29,6 +29,12 @@
                     <label>Enable SEO Suite Lite</label>
                     <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
                     <comment>Enable or disable the entire SEO Suite Lite module.</comment>
+                </field>
+                <field id="debug_mode" translate="label comment" type="select" sortOrder="20" showInDefault="1"
+                       showInWebsite="0" showInStore="0">
+                    <label>Debug Mode</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                    <comment>Write diagnostic messages to var/log/defox_seosuite.log. Errors and warnings are always logged.</comment>
                 </field>
             </group>
 
@@ -215,36 +221,17 @@
                         <field id="enabled">1</field>
                     </depends>
                 </field>
-                <field id="cache_enabled" translate="label comment" type="select" sortOrder="130" showInDefault="1"
-                       showInWebsite="1" showInStore="1">
-                    <label>Enable Canonical Cache</label>
-                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
-                    <comment>Enable or disable caching for canonical URLs. Recommended for performance.</comment>
-                    <depends>
-                        <field id="enabled">1</field>
-                    </depends>
-                </field>
-                <field id="cache_lifetime" translate="label comment" type="text" sortOrder="140" showInDefault="1"
-                       showInWebsite="1" showInStore="1">
-                    <label>Canonical Cache Lifetime</label>
-                    <validate>validate-digits</validate>
-                    <comment>Cache lifetime in seconds. Default: 86400 (24 hours)</comment>
-                    <depends>
-                        <field id="enabled">1</field>
-                        <field id="cache_enabled">1</field>
-                    </depends>
-                </field>
             </group>
 
             <!-- Friendly URLs Settings -->
             <group id="friendly_urls" translate="label" type="text" sortOrder="50" showInDefault="1" showInWebsite="1"
                    showInStore="1">
                 <label>Friendly URLs</label>
-                <field id="enabled" translate="label comment" type="select" sortOrder="10" showInDefault="1"
+                <field id="active" translate="label comment" type="select" sortOrder="10" showInDefault="1"
                        showInWebsite="1" showInStore="1">
                     <label>Enable Friendly URLs for Filters</label>
                     <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
-                    <comment>Enable or disable friendly URLs for category filters.</comment>
+                    <comment>Category filter links become path segments, e.g. women/tops-women/color-red/size-m.html. Price and category filters stay query parameters.</comment>
                 </field>
                 <field id="url_pattern" translate="label comment" type="select" sortOrder="20" showInDefault="1"
                        showInWebsite="1" showInStore="1">
@@ -252,51 +239,15 @@
                     <source_model>Defox\SEOSuite\Model\Config\Source\FriendlyUrlPattern</source_model>
                     <comment>Select the pattern for friendly URLs.</comment>
                     <depends>
-                        <field id="enabled">1</field>
-                    </depends>
-                </field>
-                <field id="filter_separator" translate="label comment" type="text" sortOrder="30" showInDefault="1"
-                       showInWebsite="1" showInStore="1">
-                    <label>Filter Separator</label>
-                    <comment>Character to use as separator between filters.</comment>
-                    <depends>
-                        <field id="enabled">1</field>
+                        <field id="active">1</field>
                     </depends>
                 </field>
                 <field id="value_separator" translate="label comment" type="text" sortOrder="40" showInDefault="1"
                        showInWebsite="1" showInStore="1">
                     <label>Value Separator</label>
-                    <comment>Character to use as separator between attribute and value.</comment>
+                    <comment>Separator between attribute code and value in a filter segment: "-" or "~". Any other value falls back to "-".</comment>
                     <depends>
-                        <field id="enabled">1</field>
-                    </depends>
-                </field>
-                <field id="multivalue_separator" translate="label comment" type="text" sortOrder="50" showInDefault="1"
-                       showInWebsite="1" showInStore="1">
-                    <label>Multi-Value Separator</label>
-                    <comment>Character to use as separator between multiple values of the same attribute.</comment>
-                    <depends>
-                        <field id="enabled">1</field>
-                    </depends>
-                </field>
-                <field id="attribute_url_map" translate="label comment" type="textarea" sortOrder="60" showInDefault="1"
-                       showInWebsite="1" showInStore="1">
-                    <label>Attribute URL Map</label>
-                    <comment>Map attribute codes to friendly URL keys. Format: attribute_code=friendly_name (one per
-                        line)
-                    </comment>
-                    <depends>
-                        <field id="enabled">1</field>
-                    </depends>
-                </field>
-                <field id="skip_prefixes" translate="label comment" type="textarea" sortOrder="70" showInDefault="1"
-                       showInWebsite="1" showInStore="1">
-                    <label>Skip URL Prefixes</label>
-                    <comment>URL prefixes that should NOT be processed as friendly URLs (one per line). These routes
-                        will be ignored by the friendly URL processor to prevent conflicts with other modules.
-                    </comment>
-                    <depends>
-                        <field id="enabled">1</field>
+                        <field id="active">1</field>
                     </depends>
                 </field>
             </group>
@@ -354,25 +305,6 @@
                     <depends>
                         <field id="enabled">1</field>
                         <field id="product_enabled">1</field>
-                    </depends>
-                </field>
-                <field id="cache_enabled" translate="label comment" type="select" sortOrder="70" showInDefault="1"
-                       showInWebsite="1" showInStore="1">
-                    <label>Enable Structured Data Cache</label>
-                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
-                    <comment>Enable caching for structured data. Recommended for performance.</comment>
-                    <depends>
-                        <field id="enabled">1</field>
-                    </depends>
-                </field>
-                <field id="cache_lifetime" translate="label comment" type="text" sortOrder="80" showInDefault="1"
-                       showInWebsite="1" showInStore="1">
-                    <label>Cache Lifetime</label>
-                    <validate>validate-digits</validate>
-                    <comment>Cache lifetime in seconds. Default: 86400 (24 hours)</comment>
-                    <depends>
-                        <field id="enabled">1</field>
-                        <field id="cache_enabled">1</field>
                     </depends>
                 </field>
                 <field id="category_product_list_enabled" translate="label comment" type="select" sortOrder="90"
@@ -555,20 +487,6 @@
                     <label>Alternate Name</label>
                     <comment>Alternative name for your website (e.g., commonly used abbreviation).</comment>
                 </field>
-                <field id="sitelinks_searchbox_enabled" translate="label comment" type="select" sortOrder="20"
-                       showInDefault="1" showInWebsite="1" showInStore="1">
-                    <label>Enable Sitelinks Searchbox</label>
-                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
-                    <comment>Enable Google Sitelinks Searchbox for your website.</comment>
-                </field>
-                <field id="sitelinks_searchbox_url" translate="label comment" type="text" sortOrder="30"
-                       showInDefault="1" showInWebsite="1" showInStore="1">
-                    <label>Search URL Pattern</label>
-                    <comment>Custom search URL pattern. Use {base_url} and {search_term} as placeholders.</comment>
-                    <depends>
-                        <field id="sitelinks_searchbox_enabled">1</field>
-                    </depends>
-                </field>
             </group>
 
             <!-- Product Attributes Mapping -->
@@ -582,6 +500,11 @@
                     <label>Brand Attribute</label>
                     <source_model>Defox\SEOSuite\Model\Config\Source\ProductAttributes</source_model>
                     <comment>Select the attribute to use for product brand.</comment>
+                </field>
+                <field id="default_brand" translate="label comment" type="text" sortOrder="15" showInDefault="1"
+                       showInWebsite="1" showInStore="1">
+                    <label>Default Brand</label>
+                    <comment>Used when the product has no value in the brand attribute or manufacturer. Leave empty to output no brand.</comment>
                 </field>
                 <field id="model_attribute" translate="label comment" type="select" sortOrder="20" showInDefault="1"
                        showInWebsite="1" showInStore="1">
@@ -633,6 +556,144 @@
                 </field>
             </group>
 
+            <!-- Offer: Merchant Return Policy (Google merchant listings) -->
+            <group id="structured_data_return_policy" translate="label comment" type="text" sortOrder="91"
+                   showInDefault="1" showInWebsite="1" showInStore="1">
+                <label>Product Return Policy</label>
+                <comment>Adds hasMerchantReturnPolicy to the product Offer. Output only when enabled and all required fields are filled in.</comment>
+                <field id="enabled" translate="label" type="select" sortOrder="10" showInDefault="1"
+                       showInWebsite="1" showInStore="1">
+                    <label>Enable Return Policy</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                </field>
+                <field id="applicable_country" translate="label comment" type="text" sortOrder="20" showInDefault="1"
+                       showInWebsite="1" showInStore="1">
+                    <label>Applicable Country</label>
+                    <comment>ISO 3166-1 alpha-2 country code(s), comma separated, e.g. PL or PL,DE,CZ.</comment>
+                    <depends>
+                        <field id="enabled">1</field>
+                    </depends>
+                </field>
+                <field id="category" translate="label" type="select" sortOrder="30" showInDefault="1"
+                       showInWebsite="1" showInStore="1">
+                    <label>Return Policy Category</label>
+                    <options>
+                        <option label="Finite return window">MerchantReturnFiniteReturnWindow</option>
+                        <option label="Returns not permitted">MerchantReturnNotPermitted</option>
+                        <option label="Unlimited return window">MerchantReturnUnlimitedWindow</option>
+                    </options>
+                    <depends>
+                        <field id="enabled">1</field>
+                    </depends>
+                </field>
+                <field id="days" translate="label comment" type="text" sortOrder="40" showInDefault="1"
+                       showInWebsite="1" showInStore="1">
+                    <label>Return Window (days)</label>
+                    <comment>Number of days the customer has to return the product.</comment>
+                    <validate>validate-digits validate-greater-than-zero</validate>
+                    <depends>
+                        <field id="enabled">1</field>
+                        <field id="category">MerchantReturnFiniteReturnWindow</field>
+                    </depends>
+                </field>
+                <field id="method" translate="label" type="select" sortOrder="50" showInDefault="1"
+                       showInWebsite="1" showInStore="1">
+                    <label>Return Method</label>
+                    <options>
+                        <option label="By mail">ReturnByMail</option>
+                        <option label="In store">ReturnInStore</option>
+                        <option label="At kiosk">ReturnAtKiosk</option>
+                    </options>
+                    <depends>
+                        <field id="enabled">1</field>
+                    </depends>
+                </field>
+                <field id="fees" translate="label" type="select" sortOrder="60" showInDefault="1"
+                       showInWebsite="1" showInStore="1">
+                    <label>Return Fees</label>
+                    <options>
+                        <option label="Free return">FreeReturn</option>
+                        <option label="Customer pays return costs">ReturnFeesCustomerResponsibility</option>
+                        <option label="Return shipping fees apply">ReturnShippingFees</option>
+                    </options>
+                    <depends>
+                        <field id="enabled">1</field>
+                    </depends>
+                </field>
+                <field id="fees_amount" translate="label comment" type="text" sortOrder="70" showInDefault="1"
+                       showInWebsite="1" showInStore="1">
+                    <label>Return Shipping Fee</label>
+                    <comment>Return shipping cost in the base currency. Converted to the currency of the offer price. If empty, "Customer pays return costs" is output instead.</comment>
+                    <validate>validate-number validate-zero-or-greater</validate>
+                    <depends>
+                        <field id="enabled">1</field>
+                        <field id="fees">ReturnShippingFees</field>
+                    </depends>
+                </field>
+            </group>
+
+            <!-- Offer: Shipping Details (Google merchant listings) -->
+            <group id="structured_data_shipping" translate="label comment" type="text" sortOrder="92"
+                   showInDefault="1" showInWebsite="1" showInStore="1">
+                <label>Product Shipping Details</label>
+                <comment>Adds shippingDetails to the product Offer. Output only when enabled and the shipping rate and destination country are filled in. Delivery time is added only when all four day fields are filled in.</comment>
+                <field id="enabled" translate="label" type="select" sortOrder="10" showInDefault="1"
+                       showInWebsite="1" showInStore="1">
+                    <label>Enable Shipping Details</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                </field>
+                <field id="rate" translate="label comment" type="text" sortOrder="20" showInDefault="1"
+                       showInWebsite="1" showInStore="1">
+                    <label>Shipping Rate</label>
+                    <comment>Shipping cost in the base currency (0 for free shipping). Converted to the currency of the offer price.</comment>
+                    <validate>validate-number validate-zero-or-greater</validate>
+                    <depends>
+                        <field id="enabled">1</field>
+                    </depends>
+                </field>
+                <field id="destination_country" translate="label comment" type="text" sortOrder="30" showInDefault="1"
+                       showInWebsite="1" showInStore="1">
+                    <label>Shipping Destination Country</label>
+                    <comment>ISO 3166-1 alpha-2 country code(s), comma separated, e.g. PL or PL,DE,CZ.</comment>
+                    <depends>
+                        <field id="enabled">1</field>
+                    </depends>
+                </field>
+                <field id="handling_min_days" translate="label" type="text" sortOrder="40" showInDefault="1"
+                       showInWebsite="1" showInStore="1">
+                    <label>Handling Time Min (days)</label>
+                    <validate>validate-digits</validate>
+                    <depends>
+                        <field id="enabled">1</field>
+                    </depends>
+                </field>
+                <field id="handling_max_days" translate="label" type="text" sortOrder="50" showInDefault="1"
+                       showInWebsite="1" showInStore="1">
+                    <label>Handling Time Max (days)</label>
+                    <validate>validate-digits</validate>
+                    <depends>
+                        <field id="enabled">1</field>
+                    </depends>
+                </field>
+                <field id="transit_min_days" translate="label" type="text" sortOrder="60" showInDefault="1"
+                       showInWebsite="1" showInStore="1">
+                    <label>Transit Time Min (days)</label>
+                    <validate>validate-digits</validate>
+                    <depends>
+                        <field id="enabled">1</field>
+                    </depends>
+                </field>
+                <field id="transit_max_days" translate="label comment" type="text" sortOrder="70" showInDefault="1"
+                       showInWebsite="1" showInStore="1">
+                    <label>Transit Time Max (days)</label>
+                    <comment>Min must not be greater than max, otherwise delivery time is not output.</comment>
+                    <validate>validate-digits</validate>
+                    <depends>
+                        <field id="enabled">1</field>
+                    </depends>
+                </field>
+            </group>
+
             <!-- Sitemap Settings -->
             <group id="sitemap" translate="label" type="text" sortOrder="100" showInDefault="1" showInWebsite="1"
                    showInStore="1">
@@ -656,9 +717,8 @@
                 <field id="path" translate="label comment" type="text" sortOrder="30" showInDefault="1"
                        showInWebsite="1" showInStore="1">
                     <label>Sitemap Path</label>
-                    <comment>Path relative to Magento root directory where sitemap files will be stored. Default:
-                        media/maps/
-                    </comment>
+                    <comment>Path relative to the pub/ directory where sitemap files will be stored. Default: media/maps/</comment>
+                    <backend_model>Defox\SEOSuite\Model\Config\Backend\SitemapPath</backend_model>
                     <depends>
                         <field id="enabled">1</field>
                     </depends>
@@ -673,18 +733,9 @@
                     </depends>
                 </field>
                 <field id="generation_cron_expr" translate="label comment" type="text" sortOrder="50" showInDefault="1"
-                       showInWebsite="1" showInStore="1">
+                       showInWebsite="0" showInStore="0">
                     <label>Cron Schedule</label>
                     <comment>Cron expression for automatic generation. Default: 0 2 * * * (daily at 2 AM)</comment>
-                    <depends>
-                        <field id="enabled">1</field>
-                    </depends>
-                </field>
-                <field id="ping_search_engines" translate="label comment" type="select" sortOrder="60" showInDefault="1"
-                       showInWebsite="1" showInStore="1">
-                    <label>Ping Search Engines</label>
-                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
-                    <comment>Automatically notify search engines after sitemap generation.</comment>
                     <depends>
                         <field id="enabled">1</field>
                     </depends>
@@ -706,6 +757,12 @@
                     <depends>
                         <field id="enabled">1</field>
                     </depends>
+                </field>
+                <field id="statistics_retention_days" translate="label comment" type="text" sortOrder="75"
+                       showInDefault="1" showInWebsite="0" showInStore="0">
+                    <label>Statistics Retention (days)</label>
+                    <comment>Sitemap generation statistics older than this many days are deleted by a daily cron job. 0 keeps them forever.</comment>
+                    <validate>required-entry validate-digits</validate>
                 </field>
 
                 <!-- Product Settings Group -->
@@ -943,8 +1000,7 @@
                     <field id="custom_links" translate="label comment" type="textarea" sortOrder="40" showInDefault="1"
                            showInWebsite="1" showInStore="1">
                         <label>Custom Links</label>
-                        <comment>Custom URLs to include in sitemap (one per line). Format: URL|priority|changefreq
-                        </comment>
+                        <comment>One link per line: a path relative to the store URL (e.g. about-us) or an absolute URL on the store&apos;s own domain, optionally followed by |priority|changefreq. Links to other domains or with another scheme (javascript:, mailto:) are ignored.</comment>
                         <depends>
                             <field id="enabled">1</field>
                         </depends>

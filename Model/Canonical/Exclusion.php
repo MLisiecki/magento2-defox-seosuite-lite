@@ -14,7 +14,6 @@ use Defox\SEOSuite\Helper\Config;
 use Magento\Catalog\Model\Category;
 use Magento\Catalog\Model\Product;
 use Magento\Framework\App\Request\Http;
-use Magento\Framework\Registry;
 
 /**
  * Class to handle canonicals exclusions
@@ -32,23 +31,15 @@ class Exclusion
     private Http $request;
 
     /**
-     * @var Registry
-     */
-    private Registry $registry;
-
-    /**
      * @param Config $config
      * @param Http $request
-     * @param Registry $registry
      */
     public function __construct(
         Config $config,
-        Http $request,
-        Registry $registry
+        Http $request
     ) {
         $this->config = $config;
         $this->request = $request;
-        $this->registry = $registry;
     }
 
     /**
@@ -134,45 +125,6 @@ class Exclusion
         
         // Check if it's an anchor category and we should exclude those
         if ($this->config->shouldExcludeAnchorCategories() && $category->getIsAnchor()) {
-            return true;
-        }
-        
-        return false;
-    }
-
-    /**
-     * Check if CMS page should be excluded from canonical
-     *
-     * @param string $pageId
-     * @return bool
-     */
-    public function isCmsPageExcluded(string $pageId): bool
-    {
-        // Check if canonical is disabled for this CMS page
-        $excludedCmsPages = $this->config->getExcludedCmsPages();
-        if (in_array($pageId, $excludedCmsPages)) {
-            return true;
-        }
-        
-        // Check if we should exclude based on URL pattern
-        if ($this->isPageExcluded()) {
-            return true;
-        }
-        
-        return false;
-    }
-
-    /**
-     * Check if the current page should have a noindex tag
-     *
-     * @return bool
-     */
-    public function hasNoindexTag(): bool
-    {
-        // Check if robots tag is set to NOINDEX
-        $robotsTag = $this->registry->registry('robots_tag');
-        
-        if ($robotsTag && stripos($robotsTag, 'noindex') !== false) {
             return true;
         }
         

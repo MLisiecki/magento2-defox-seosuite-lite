@@ -21,38 +21,17 @@ interface SitemapGeneratorInterface
      *
      * @param int $storeId
      * @param array $options Additional options for generation
-     * @return array Array of generated file paths
+     * @return array Absolute paths of the published files (index first when there is one)
      * @throws \Exception
      */
     public function generate(int $storeId, array $options = []): array;
 
     /**
-     * Generate sitemap index file
+     * Statistics of the last generate() call: store_id, files[name,size,urls], total_urls, errors, duration
      *
-     * @param int $storeId
-     * @param array $sitemapFiles Array of sitemap file URLs
-     * @return string Path to generated index file
-     * @throws \Exception
+     * @return array
      */
-    public function generateIndex(int $storeId, array $sitemapFiles): string;
-
-    /**
-     * Ping search engines about sitemap update
-     *
-     * @param string $sitemapUrl
-     * @param int $storeId
-     * @return array Results of ping operations
-     */
-    public function pingSearchEngines(string $sitemapUrl, int $storeId = 0): array;
-
-    /**
-     * Get sitemap file path
-     *
-     * @param int $storeId
-     * @param int $fileNumber File number for multiple files
-     * @return string
-     */
-    public function getFilePath(int $storeId, int $fileNumber = 0): string;
+    public function getGenerationStats(): array;
 
     /**
      * Get sitemap URL
@@ -62,14 +41,6 @@ interface SitemapGeneratorInterface
      * @return string
      */
     public function getSitemapUrl(int $storeId, string $fileName): string;
-
-    /**
-     * Clean old sitemap files
-     *
-     * @param int $storeId
-     * @return int Number of deleted files
-     */
-    public function cleanOldFiles(int $storeId): int;
 
     /**
      * Validate sitemap file
